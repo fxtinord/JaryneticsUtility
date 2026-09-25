@@ -85,7 +85,7 @@ If the authorized task appears to require one of these, stop and report the need
 
 ## Mandatory Completion Handoff
 
-At the end of every implementation task, provide a concise handoff containing:
+At the end of every implementation task, provide the complete handoff below. Do not end the task after Build/Test completion. Before considering the task complete, you MUST emit the full Mandatory Completion Handoff in the conversation. A task is incomplete until that handoff has been provided:
 
 1. Objective completed.
 2. Files created.

@@ -1,23 +1,24 @@
-//
-//  JaryneticsUtilityApp.swift
-//  JaryneticsUtility
-//
-//  Created by Fred Thomas, Jr. on 9/24/26.
-//
-
-import SwiftUI
 import SwiftData
+import SwiftUI
 
 @main
 struct JaryneticsUtilityApp: App {
-    var sharedModelContainer: ModelContainer = {
+    private let sharedModelContainer: ModelContainer = {
         let schema = Schema([
-            Item.self,
+            Household.self,
+            UtilityService.self,
+            UtilityBill.self,
         ])
-        let modelConfiguration = ModelConfiguration(schema: schema, isStoredInMemoryOnly: false)
+        let configuration = ModelConfiguration(
+            schema: schema,
+            isStoredInMemoryOnly: false
+        )
 
         do {
-            return try ModelContainer(for: schema, configurations: [modelConfiguration])
+            return try ModelContainer(
+                for: schema,
+                configurations: [configuration]
+            )
         } catch {
             fatalError("Could not create ModelContainer: \(error)")
         }
