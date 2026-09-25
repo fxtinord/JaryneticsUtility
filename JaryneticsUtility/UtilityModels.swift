@@ -13,6 +13,11 @@ enum BillVerificationState: String, Codable, CaseIterable {
     case verified
 }
 
+enum SourceDocumentType: String, Codable {
+    case pdf
+    case image
+}
+
 @Model
 final class Household {
     @Attribute(.unique) var id: UUID
@@ -74,6 +79,8 @@ final class UtilityBill {
     var dueDate: Date?
     var verificationState: BillVerificationState
     var createdAt: Date
+    @Relationship(deleteRule: .cascade)
+    var sourceDocument: SourceDocument?
 
     init(
         id: UUID = UUID(),
@@ -88,7 +95,8 @@ final class UtilityBill {
         usageUnit: String? = nil,
         dueDate: Date? = nil,
         verificationState: BillVerificationState = .draft,
-        createdAt: Date = Date()
+        createdAt: Date = Date(),
+        sourceDocument: SourceDocument? = nil
     ) {
         self.id = id
         self.utilityService = utilityService
@@ -103,5 +111,30 @@ final class UtilityBill {
         self.dueDate = dueDate
         self.verificationState = verificationState
         self.createdAt = createdAt
+        self.sourceDocument = sourceDocument
+    }
+}
+
+
+@Model
+final class SourceDocument {
+    @Attribute(.unique) var id: UUID
+    var relativePath: String
+    var originalFilename: String?
+    var documentType: SourceDocumentType
+    var importedAt: Date
+
+    init(
+        id: UUID = UUID(),
+        relativePath: String,
+        originalFilename: String? = nil,
+        documentType: SourceDocumentType,
+        importedAt: Date = Date()
+    ) {
+        self.id = id
+        self.relativePath = relativePath
+        self.originalFilename = originalFilename
+        self.documentType = documentType
+        self.importedAt = importedAt
     }
 }
