@@ -13,6 +13,8 @@ struct ContentView: View {
     @State private var isShowingError = false
     @State private var errorMessage = ""
     @State private var previewURL: URL?
+    @State private var recognizingBillIDs: Set<UUID> = []
+    @State private var recognitionPresentation: RecognitionPresentation?
 
     var body: some View {
         NavigationStack {
@@ -20,9 +22,12 @@ struct ContentView: View {
                 ImportActionSection {
                     isShowingFileImporter = true
                 }
-                ImportedBillsSection(bills: bills) { sourceDocument in
-                    preview(sourceDocument)
-                }
+                ImportedBillsSection(
+                    bills: bills,
+                    recognizingBillIDs: recognizingBillIDs,
+                    onPreview: preview,
+                    onRecognize: recognize
+                )
             }
             .navigationTitle("Utility Bills")
             .fileImporter(
@@ -32,6 +37,9 @@ struct ContentView: View {
                 importSelectedDocument(result)
             }
             .quickLookPreview($previewURL)
+            .sheet(item: $recognitionPresentation) { presentation in
+                RecognitionResultView(result: presentation.result)
+            }
             .alert("Document Error", isPresented: $isShowingError) {
                 Button("OK") {}
             } message: {
@@ -83,6 +91,34 @@ struct ContentView: View {
         }
     }
 
+    private func recognize(_ bill: UtilityBill) {
+        guard let sourceDocument = bill.sourceDocument else {
+            present(DocumentRecognitionError.unsupportedDocumentType)
+            return
+        }
+
+        recognizingBillIDs.insert(bill.id)
+        Task {
+            defer { recognizingBillIDs.remove(bill.id) }
+            do {
+                let documentStore = try SourceDocumentStore.applicationSupport()
+                let sourceURL = try documentStore.resolve(
+                    relativePath: sourceDocument.relativePath
+                )
+                let result = try await DocumentRecognitionService().recognize(
+                    sourceURL: sourceURL,
+                    documentType: sourceDocument.documentType
+                )
+                recognitionPresentation = RecognitionPresentation(
+                    id: bill.id,
+                    result: result
+                )
+            } catch {
+                present(error)
+            }
+        }
+    }
+
     private func present(_ error: Error) {
         errorMessage = error.localizedDescription
         isShowingError = true
@@ -105,7 +141,9 @@ private struct ImportActionSection: View {
 
 private struct ImportedBillsSection: View {
     let bills: [UtilityBill]
+    let recognizingBillIDs: Set<UUID>
     let onPreview: (SourceDocument) -> Void
+    let onRecognize: (UtilityBill) -> Void
 
     var body: some View {
         Section("Imported Bills") {
@@ -120,10 +158,11 @@ private struct ImportedBillsSection: View {
                     if let sourceDocument = bill.sourceDocument {
                         ImportedBillRow(
                             filename: sourceDocument.originalFilename,
-                            importedAt: sourceDocument.importedAt
-                        ) {
-                            onPreview(sourceDocument)
-                        }
+                            importedAt: sourceDocument.importedAt,
+                            isRecognizing: recognizingBillIDs.contains(bill.id),
+                            onPreview: { onPreview(sourceDocument) },
+                            onRecognize: { onRecognize(bill) }
+                        )
                     }
                 }
             }
@@ -134,16 +173,102 @@ private struct ImportedBillsSection: View {
 private struct ImportedBillRow: View {
     let filename: String?
     let importedAt: Date
+    let isRecognizing: Bool
     let onPreview: () -> Void
+    let onRecognize: () -> Void
 
     var body: some View {
-        Button(action: onPreview) {
-            VStack(alignment: .leading, spacing: 4) {
-                Text(filename ?? String(localized: "Imported Bill"))
-                    .font(.headline)
-                Text(importedAt, format: .dateTime.month().day().year())
-                    .font(.caption)
+        VStack(alignment: .leading, spacing: 8) {
+            Text(filename ?? String(localized: "Imported Bill"))
+                .font(.headline)
+            Text(importedAt, format: .dateTime.month().day().year())
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            ViewThatFits {
+                HStack {
+                    actionButtons
+                }
+                VStack(alignment: .leading) {
+                    actionButtons
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var actionButtons: some View {
+        Button("Preview", action: onPreview)
+        Button(action: onRecognize) {
+            if isRecognizing {
+                ProgressView()
+                    .accessibilityLabel("Recognizing Text")
+            } else {
+                Text("Recognize Text")
+            }
+        }
+        .disabled(isRecognizing)
+    }
+}
+
+private struct RecognitionPresentation: Identifiable {
+    let id: UUID
+    let result: DocumentRecognitionResult
+}
+
+private struct RecognitionResultView: View {
+    @Environment(\.dismiss) private var dismiss
+    let result: DocumentRecognitionResult
+
+    var body: some View {
+        NavigationStack {
+            List {
+                RecognitionSummarySection(
+                    pageCount: result.pages.count,
+                    lineCount: result.lineCount,
+                    warningCount: result.warnings.count
+                )
+                RecognitionTextSection(text: result.text)
+            }
+            .navigationTitle("Recognition Result")
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Done") {
+                        dismiss()
+                    }
+                }
+            }
+        }
+    }
+}
+
+private struct RecognitionSummarySection: View {
+    let pageCount: Int
+    let lineCount: Int
+    let warningCount: Int
+
+    var body: some View {
+        Section("Status") {
+            LabeledContent("Pages", value: pageCount.formatted())
+            LabeledContent("Recognized Lines", value: lineCount.formatted())
+            if warningCount > 0 {
+                LabeledContent("Warnings", value: warningCount.formatted())
+            }
+        }
+    }
+}
+
+private struct RecognitionTextSection: View {
+    let text: String
+
+    var body: some View {
+        Section("Recognized Text") {
+            if text.isEmpty {
+                Text("No text was detected.")
                     .foregroundStyle(.secondary)
+            } else {
+                Text(text)
+                    .textSelection(.enabled)
             }
         }
     }
