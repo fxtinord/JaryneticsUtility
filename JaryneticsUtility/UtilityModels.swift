@@ -108,6 +108,8 @@ final class UtilityBillServiceDetail {
     var currentPeriodCharges: Decimal?
     var usageQuantity: Decimal?
     var usageUnit: String?
+    @Relationship(deleteRule: .cascade, inverse: \DistributedEnergyDetail.serviceDetail)
+    var distributedEnergyDetail: DistributedEnergyDetail?
 
     init(
         id: UUID = UUID(),
@@ -129,6 +131,72 @@ final class UtilityBillServiceDetail {
         self.currentPeriodCharges = currentPeriodCharges
         self.usageQuantity = usageQuantity
         self.usageUnit = usageUnit
+        self.distributedEnergyDetail = nil
+    }
+}
+
+@Model
+final class DistributedEnergyDetail {
+    @Attribute(.unique) var id: UUID
+    var serviceDetail: UtilityBillServiceDetail
+    var isNetMetered: Bool?
+    var netEnergyQuantity: Decimal?
+    var netEnergyUnit: String?
+    var generationQuantity: Decimal?
+    var generationUnit: String?
+    var priorEnergyCreditBalance: Decimal?
+    var energyCreditReceived: Decimal?
+    var energyCreditApplied: Decimal?
+    var newEnergyCreditBalance: Decimal?
+    var energyCreditUnit: String?
+    var priorMonetaryCreditBalance: Decimal?
+    var monetaryCreditReceived: Decimal?
+    var monetaryCreditApplied: Decimal?
+    var newMonetaryCreditBalance: Decimal?
+    var settlementMonth: Int?
+    var incentivePaymentAmount: Decimal?
+    var programLabel: String?
+
+    init(
+        id: UUID = UUID(),
+        serviceDetail: UtilityBillServiceDetail,
+        isNetMetered: Bool? = nil,
+        netEnergyQuantity: Decimal? = nil,
+        netEnergyUnit: String? = nil,
+        generationQuantity: Decimal? = nil,
+        generationUnit: String? = nil,
+        priorEnergyCreditBalance: Decimal? = nil,
+        energyCreditReceived: Decimal? = nil,
+        energyCreditApplied: Decimal? = nil,
+        newEnergyCreditBalance: Decimal? = nil,
+        energyCreditUnit: String? = nil,
+        priorMonetaryCreditBalance: Decimal? = nil,
+        monetaryCreditReceived: Decimal? = nil,
+        monetaryCreditApplied: Decimal? = nil,
+        newMonetaryCreditBalance: Decimal? = nil,
+        settlementMonth: Int? = nil,
+        incentivePaymentAmount: Decimal? = nil,
+        programLabel: String? = nil
+    ) {
+        self.id = id
+        self.serviceDetail = serviceDetail
+        self.isNetMetered = isNetMetered
+        self.netEnergyQuantity = netEnergyQuantity
+        self.netEnergyUnit = netEnergyUnit
+        self.generationQuantity = generationQuantity
+        self.generationUnit = generationUnit
+        self.priorEnergyCreditBalance = priorEnergyCreditBalance
+        self.energyCreditReceived = energyCreditReceived
+        self.energyCreditApplied = energyCreditApplied
+        self.newEnergyCreditBalance = newEnergyCreditBalance
+        self.energyCreditUnit = energyCreditUnit
+        self.priorMonetaryCreditBalance = priorMonetaryCreditBalance
+        self.monetaryCreditReceived = monetaryCreditReceived
+        self.monetaryCreditApplied = monetaryCreditApplied
+        self.newMonetaryCreditBalance = newMonetaryCreditBalance
+        self.settlementMonth = settlementMonth
+        self.incentivePaymentAmount = incentivePaymentAmount
+        self.programLabel = programLabel
     }
 }
 

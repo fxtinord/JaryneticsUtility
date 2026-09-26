@@ -199,6 +199,7 @@ struct DocumentRecognitionTests {
             UtilityService.self,
             UtilityBill.self,
             UtilityBillServiceDetail.self,
+            DistributedEnergyDetail.self,
             SourceDocument.self,
         ])
         let configuration = ModelConfiguration(

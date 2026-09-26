@@ -397,6 +397,7 @@ private struct RecognitionTextSection: View {
                 UtilityService.self,
                 UtilityBill.self,
                 UtilityBillServiceDetail.self,
+                DistributedEnergyDetail.self,
                 SourceDocument.self,
             ],
             inMemory: true
