@@ -51,11 +51,9 @@ struct SourceDocumentImportTests {
             rootDirectoryURL: testDirectory.appendingPathComponent("StoredDocuments")
         )
         let container = try makeContainer()
-        let service = try insertUtilityService(in: container.mainContext)
 
         try BillImportService(documentStore: store).importBill(
             from: sourceURL,
-            for: service,
             in: container.mainContext
         )
 
@@ -65,7 +63,7 @@ struct SourceDocumentImportTests {
         )
         let sourceDocument = try #require(bill.sourceDocument)
         #expect(bill.verificationState == .draft)
-        #expect(bill.utilityService.id == service.id)
+        #expect(bill.serviceDetails.isEmpty)
         #expect(sourceDocument.originalFilename == "synthetic-bill.pdf")
         #expect(sourceDocument.documentType == .pdf)
         #expect(!sourceDocument.relativePath.isEmpty)
@@ -97,13 +95,11 @@ struct SourceDocumentImportTests {
             rootDirectoryURL: testDirectory.appendingPathComponent("StoredDocuments")
         )
         let container = try makeContainer()
-        let service = try insertUtilityService(in: container.mainContext)
         var didFail = false
 
         do {
             try BillImportService(documentStore: store).importBill(
                 from: missingSourceURL,
-                for: service,
                 in: container.mainContext
             )
         } catch {
@@ -137,6 +133,7 @@ struct SourceDocumentImportTests {
             Household.self,
             UtilityService.self,
             UtilityBill.self,
+            UtilityBillServiceDetail.self,
             SourceDocument.self,
         ])
         let configuration = ModelConfiguration(
@@ -149,15 +146,4 @@ struct SourceDocumentImportTests {
         )
     }
 
-    private func insertUtilityService(in modelContext: ModelContext) throws -> UtilityService {
-        let household = Household(name: "Synthetic Test Household")
-        let service = UtilityService(
-            serviceType: .electricity,
-            providerName: "Synthetic Utility",
-            household: household
-        )
-        modelContext.insert(household)
-        try modelContext.save()
-        return service
-    }
 }

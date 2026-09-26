@@ -198,6 +198,7 @@ struct DocumentRecognitionTests {
             Household.self,
             UtilityService.self,
             UtilityBill.self,
+            UtilityBillServiceDetail.self,
             SourceDocument.self,
         ])
         let configuration = ModelConfiguration(
@@ -216,19 +217,12 @@ struct DocumentRecognitionTests {
         verificationState: BillVerificationState,
         in modelContext: ModelContext
     ) throws -> UtilityBill {
-        let household = Household(name: "Synthetic Recognition Household")
-        let service = UtilityService(
-            serviceType: .electricity,
-            providerName: "Synthetic Utility",
-            household: household
-        )
         let sourceDocument = SourceDocument(
             relativePath: sourceURL.lastPathComponent,
             originalFilename: sourceURL.lastPathComponent,
             documentType: documentType
         )
         let bill = UtilityBill(
-            utilityService: service,
             verificationState: verificationState,
             sourceDocument: sourceDocument
         )

@@ -34,7 +34,9 @@ struct SourceDocumentStore {
         rootDirectoryURL: URL,
         fileManager: FileManager = .default
     ) {
-        self.rootDirectoryURL = rootDirectoryURL.standardizedFileURL
+        self.rootDirectoryURL = rootDirectoryURL
+            .resolvingSymlinksInPath()
+            .standardizedFileURL
         self.fileManager = fileManager
     }
 
@@ -98,10 +100,16 @@ struct SourceDocumentStore {
             throw SourceDocumentStoreError.invalidStoredPath
         }
 
-        let storedURL = rootDirectoryURL
-            .appendingPathComponent(relativePath)
+        // Resolve both sides after the directory exists. Simulator container paths can
+        // gain a symlink-resolved prefix between initialization and a later lookup.
+        let resolvedRootDirectoryURL = rootDirectoryURL
+            .resolvingSymlinksInPath()
             .standardizedFileURL
-        guard storedURL.deletingLastPathComponent().path == rootDirectoryURL.path else {
+        let storedURL = resolvedRootDirectoryURL
+            .appendingPathComponent(relativePath)
+            .resolvingSymlinksInPath()
+            .standardizedFileURL
+        guard storedURL.deletingLastPathComponent().path == resolvedRootDirectoryURL.path else {
             throw SourceDocumentStoreError.invalidStoredPath
         }
         guard fileManager.fileExists(atPath: storedURL.path) else {

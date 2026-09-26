@@ -7,7 +7,6 @@ struct BillImportService {
     @discardableResult
     func importBill(
         from sourceURL: URL,
-        for utilityService: UtilityService,
         in modelContext: ModelContext
     ) throws -> UtilityBill {
         let storedDocument = try documentStore.importDocument(from: sourceURL)
@@ -19,7 +18,6 @@ struct BillImportService {
             importedAt: storedDocument.importedAt
         )
         let bill = UtilityBill(
-            utilityService: utilityService,
             verificationState: .draft,
             sourceDocument: sourceDocument
         )

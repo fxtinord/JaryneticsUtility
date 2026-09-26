@@ -1,3 +1,4 @@
+import Foundation
 import QuickLook
 import SwiftData
 import SwiftUI
@@ -7,8 +8,6 @@ struct ContentView: View {
     @Environment(\.modelContext) private var modelContext
     @Query(sort: \UtilityBill.createdAt, order: .reverse)
     private var bills: [UtilityBill]
-    @Query private var utilityServices: [UtilityService]
-
     @State private var isShowingFileImporter = false
     @State private var isShowingError = false
     @State private var errorMessage = ""
@@ -38,7 +37,10 @@ struct ContentView: View {
             }
             .quickLookPreview($previewURL)
             .sheet(item: $recognitionPresentation) { presentation in
-                RecognitionResultView(result: presentation.result)
+                RecognitionResultView(
+                    result: presentation.result,
+                    extraction: presentation.extraction
+                )
             }
             .alert("Document Error", isPresented: $isShowingError) {
                 Button("OK") {}
@@ -51,33 +53,15 @@ struct ContentView: View {
     private func importSelectedDocument(_ result: Result<URL, Error>) {
         do {
             let selectedURL = try result.get()
-            let service = try utilityServiceForImport()
             let documentStore = try SourceDocumentStore.applicationSupport()
             let importService = BillImportService(documentStore: documentStore)
             try importService.importBill(
                 from: selectedURL,
-                for: service,
                 in: modelContext
             )
         } catch {
             present(error)
         }
-    }
-
-    private func utilityServiceForImport() throws -> UtilityService {
-        if let utilityService = utilityServices.first {
-            return utilityService
-        }
-
-        let household = Household(name: "My Household")
-        let utilityService = UtilityService(
-            serviceType: .electricity,
-            providerName: "Utility Provider",
-            household: household
-        )
-        modelContext.insert(household)
-        try modelContext.save()
-        return utilityService
     }
 
     private func preview(_ sourceDocument: SourceDocument) {
@@ -109,9 +93,11 @@ struct ContentView: View {
                     sourceURL: sourceURL,
                     documentType: sourceDocument.documentType
                 )
+                let extraction = BillFieldExtractor().extract(from: result)
                 recognitionPresentation = RecognitionPresentation(
                     id: bill.id,
-                    result: result
+                    result: result,
+                    extraction: extraction
                 )
             } catch {
                 present(error)
@@ -214,11 +200,13 @@ private struct ImportedBillRow: View {
 private struct RecognitionPresentation: Identifiable {
     let id: UUID
     let result: DocumentRecognitionResult
+    let extraction: BillExtractionResult
 }
 
 private struct RecognitionResultView: View {
     @Environment(\.dismiss) private var dismiss
     let result: DocumentRecognitionResult
+    let extraction: BillExtractionResult
 
     var body: some View {
         NavigationStack {
@@ -228,6 +216,7 @@ private struct RecognitionResultView: View {
                     lineCount: result.lineCount,
                     warningCount: result.warnings.count
                 )
+                ProposedDataSection(extraction: extraction)
                 RecognitionTextSection(text: result.text)
             }
             .navigationTitle("Recognition Result")
@@ -239,6 +228,132 @@ private struct RecognitionResultView: View {
                 }
             }
         }
+    }
+}
+
+private struct ProposedDataSection: View {
+    let extraction: BillExtractionResult
+
+    var body: some View {
+        Section {
+            if extraction.statementProposals.isEmpty {
+                Text("No supported statement fields were proposed.")
+                    .foregroundStyle(.secondary)
+            } else {
+                ForEach(extraction.statementProposals) { proposal in
+                    ProposedFieldRow(
+                        label: proposal.field.rawValue,
+                        value: proposal.value,
+                        provenance: proposal.provenance,
+                        origin: proposal.origin
+                    )
+                }
+            }
+        } header: {
+            Text("DEVELOPMENT / PROPOSED STATEMENT DATA")
+        } footer: {
+            Text("Statement proposals are unverified and transient.")
+        }
+
+        ForEach(extraction.serviceGroups) { group in
+            Section {
+                VStack(alignment: .leading, spacing: 4) {
+                    LabeledContent("Proposed service", value: serviceName(group.serviceType))
+                    Text("Page \(group.serviceIdentityProvenance.pageIndex + 1) · Extracted directly")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Text(group.serviceIdentityProvenance.snippet)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .textSelection(.enabled)
+                }
+                if group.proposals.isEmpty {
+                    Text("No supported service fields were proposed.")
+                        .foregroundStyle(.secondary)
+                } else {
+                    ForEach(group.proposals) { proposal in
+                        ProposedFieldRow(
+                            label: proposal.field.rawValue,
+                            value: proposal.value,
+                            provenance: proposal.provenance,
+                            origin: proposal.origin
+                        )
+                    }
+                }
+            } header: {
+                Text("DEVELOPMENT / PROPOSED SERVICE — \(serviceName(group.serviceType))")
+            } footer: {
+                Text("Service proposals are unverified, transient, and have not changed the saved bill.")
+            }
+        }
+    }
+
+    private func serviceName(_ serviceType: UtilityServiceType) -> String {
+        switch serviceType {
+        case .electricity:
+            String(localized: "Electricity")
+        case .naturalGas:
+            String(localized: "Natural gas")
+        case .waterWastewater:
+            String(localized: "Water/wastewater")
+        }
+    }
+}
+
+private struct ProposedFieldRow: View {
+    let label: String
+    let value: BillProposedValue
+    let provenance: BillSourceProvenance
+    let origin: BillProposalOrigin
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            LabeledContent(label, value: displayValue(value))
+            Text("Page \(provenance.pageIndex + 1) · \(originLabel(origin))")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            Text(provenance.snippet)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .textSelection(.enabled)
+        }
+    }
+
+    private func displayValue(_ value: BillProposedValue) -> String {
+        switch value {
+        case .date(let date):
+            BillDateOnlyPresentation.string(from: date)
+        case .decimal(let decimal):
+            decimal.formatted()
+        case .integer(let integer):
+            integer.formatted()
+        case .text(let text):
+            text
+        }
+    }
+
+    private func originLabel(_ origin: BillProposalOrigin) -> String {
+        switch origin {
+        case .extracted:
+            String(localized: "Extracted directly")
+        case .derived:
+            String(localized: "Deterministically derived")
+        }
+    }
+}
+
+enum BillDateOnlyPresentation {
+    static func string(
+        from date: Date,
+        locale: Locale = .current
+    ) -> String {
+        let formatter = DateFormatter()
+        formatter.calendar = Calendar(identifier: .gregorian)
+        formatter.locale = locale
+        formatter.timeZone = TimeZone(secondsFromGMT: 0)
+        formatter.dateStyle = .medium
+        formatter.timeStyle = .none
+        return formatter.string(from: date)
     }
 }
 
@@ -281,6 +396,7 @@ private struct RecognitionTextSection: View {
                 Household.self,
                 UtilityService.self,
                 UtilityBill.self,
+                UtilityBillServiceDetail.self,
                 SourceDocument.self,
             ],
             inMemory: true

@@ -74,14 +74,7 @@ struct JaryneticsUtilityTests {
     @Test
     func createsDraftUtilityBill() throws {
         let container = try makeContainer()
-        let household = Household(name: "Test Household")
-        let service = UtilityService(
-            serviceType: .naturalGas,
-            providerName: "Gas Provider",
-            household: household
-        )
         let bill = UtilityBill(
-            utilityService: service,
             amountDue: Decimal(string: "92.14"),
             verificationState: .draft
         )
@@ -90,21 +83,13 @@ struct JaryneticsUtilityTests {
         try container.mainContext.save()
 
         #expect(bill.verificationState == .draft)
-        #expect(bill.utilityService === service)
-        #expect(service.bills.count == 1)
-        #expect(service.bills.first === bill)
+        #expect(bill.serviceDetails.isEmpty)
     }
 
     @Test
     func transitionsVerificationStateToVerified() throws {
         let container = try makeContainer()
-        let household = Household(name: "Test Household")
-        let service = UtilityService(
-            serviceType: .waterWastewater,
-            providerName: "Water Provider",
-            household: household
-        )
-        let bill = UtilityBill(utilityService: service)
+        let bill = UtilityBill()
 
         container.mainContext.insert(bill)
         bill.verificationState = .verified
@@ -117,13 +102,7 @@ struct JaryneticsUtilityTests {
     @Test
     func preservesMissingOptionalBillFields() throws {
         let container = try makeContainer()
-        let household = Household(name: "Test Household")
-        let service = UtilityService(
-            serviceType: .electricity,
-            providerName: "Electric Provider",
-            household: household
-        )
-        let bill = UtilityBill(utilityService: service)
+        let bill = UtilityBill()
 
         container.mainContext.insert(bill)
         try container.mainContext.save()
@@ -132,14 +111,9 @@ struct JaryneticsUtilityTests {
             container.mainContext.fetch(FetchDescriptor<UtilityBill>()).first
         )
         #expect(storedBill.statementDate == nil)
-        #expect(storedBill.billingPeriodStart == nil)
-        #expect(storedBill.billingPeriodEnd == nil)
-        #expect(storedBill.billingDays == nil)
         #expect(storedBill.amountDue == nil)
-        #expect(storedBill.currentPeriodCharges == nil)
-        #expect(storedBill.usageQuantity == nil)
-        #expect(storedBill.usageUnit == nil)
         #expect(storedBill.dueDate == nil)
+        #expect(storedBill.serviceDetails.isEmpty)
     }
 
     @Test
@@ -159,36 +133,42 @@ struct JaryneticsUtilityTests {
         let currentPeriodCharges = Decimal(string: "121.32")
         let usageQuantity = Decimal(string: "842.6")
         let bill = UtilityBill(
-            utilityService: service,
             statementDate: statementDate,
-            billingPeriodStart: billingPeriodStart,
-            billingPeriodEnd: billingPeriodEnd,
-            billingDays: 31,
             amountDue: amountDue,
-            currentPeriodCharges: currentPeriodCharges,
-            usageQuantity: usageQuantity,
-            usageUnit: "kWh",
             dueDate: dueDate,
             verificationState: .needsReview
         )
+        let detail = UtilityBillServiceDetail(
+            utilityBill: bill,
+            utilityService: service,
+            billingPeriodStart: billingPeriodStart,
+            billingPeriodEnd: billingPeriodEnd,
+            billingDays: 31,
+            currentPeriodCharges: currentPeriodCharges,
+            usageQuantity: usageQuantity,
+            usageUnit: "kWh"
+        )
 
         container.mainContext.insert(bill)
+        container.mainContext.insert(detail)
         try container.mainContext.save()
 
         let verificationContext = ModelContext(container)
         let storedBill = try #require(
             verificationContext.fetch(FetchDescriptor<UtilityBill>()).first
         )
+        let storedDetail = try #require(storedBill.serviceDetails.first)
         #expect(storedBill.statementDate == statementDate)
-        #expect(storedBill.billingPeriodStart == billingPeriodStart)
-        #expect(storedBill.billingPeriodEnd == billingPeriodEnd)
-        #expect(storedBill.billingDays == 31)
         #expect(storedBill.amountDue == amountDue)
-        #expect(storedBill.currentPeriodCharges == currentPeriodCharges)
-        #expect(storedBill.usageQuantity == usageQuantity)
-        #expect(storedBill.usageUnit == "kWh")
         #expect(storedBill.dueDate == dueDate)
         #expect(storedBill.verificationState == .needsReview)
+        #expect(storedDetail.utilityService.id == service.id)
+        #expect(storedDetail.billingPeriodStart == billingPeriodStart)
+        #expect(storedDetail.billingPeriodEnd == billingPeriodEnd)
+        #expect(storedDetail.billingDays == 31)
+        #expect(storedDetail.currentPeriodCharges == currentPeriodCharges)
+        #expect(storedDetail.usageQuantity == usageQuantity)
+        #expect(storedDetail.usageUnit == "kWh")
     }
 
     private func makeContainer() throws -> ModelContainer {
@@ -196,6 +176,7 @@ struct JaryneticsUtilityTests {
             Household.self,
             UtilityService.self,
             UtilityBill.self,
+            UtilityBillServiceDetail.self,
             SourceDocument.self,
         ])
         let configuration = ModelConfiguration(

@@ -45,8 +45,8 @@ final class UtilityService {
     var providerName: String
     var serviceLabel: String?
     var household: Household
-    @Relationship(deleteRule: .cascade, inverse: \UtilityBill.utilityService)
-    var bills: [UtilityBill]
+    @Relationship(deleteRule: .cascade, inverse: \UtilityBillServiceDetail.utilityService)
+    var billDetails: [UtilityBillServiceDetail]
 
     init(
         id: UUID = UUID(),
@@ -60,58 +60,75 @@ final class UtilityService {
         self.providerName = providerName
         self.serviceLabel = serviceLabel
         self.household = household
-        self.bills = []
+        self.billDetails = []
     }
 }
 
 @Model
 final class UtilityBill {
     @Attribute(.unique) var id: UUID
-    var utilityService: UtilityService
     var statementDate: Date?
-    var billingPeriodStart: Date?
-    var billingPeriodEnd: Date?
-    var billingDays: Int?
     var amountDue: Decimal?
-    var currentPeriodCharges: Decimal?
-    var usageQuantity: Decimal?
-    var usageUnit: String?
     var dueDate: Date?
     var verificationState: BillVerificationState
     var createdAt: Date
+    @Relationship(deleteRule: .cascade, inverse: \UtilityBillServiceDetail.utilityBill)
+    var serviceDetails: [UtilityBillServiceDetail]
     @Relationship(deleteRule: .cascade)
     var sourceDocument: SourceDocument?
 
     init(
         id: UUID = UUID(),
-        utilityService: UtilityService,
         statementDate: Date? = nil,
-        billingPeriodStart: Date? = nil,
-        billingPeriodEnd: Date? = nil,
-        billingDays: Int? = nil,
         amountDue: Decimal? = nil,
-        currentPeriodCharges: Decimal? = nil,
-        usageQuantity: Decimal? = nil,
-        usageUnit: String? = nil,
         dueDate: Date? = nil,
         verificationState: BillVerificationState = .draft,
         createdAt: Date = Date(),
         sourceDocument: SourceDocument? = nil
     ) {
         self.id = id
-        self.utilityService = utilityService
         self.statementDate = statementDate
-        self.billingPeriodStart = billingPeriodStart
-        self.billingPeriodEnd = billingPeriodEnd
-        self.billingDays = billingDays
         self.amountDue = amountDue
-        self.currentPeriodCharges = currentPeriodCharges
-        self.usageQuantity = usageQuantity
-        self.usageUnit = usageUnit
         self.dueDate = dueDate
         self.verificationState = verificationState
         self.createdAt = createdAt
+        self.serviceDetails = []
         self.sourceDocument = sourceDocument
+    }
+}
+
+@Model
+final class UtilityBillServiceDetail {
+    @Attribute(.unique) var id: UUID
+    var utilityBill: UtilityBill
+    var utilityService: UtilityService
+    var billingPeriodStart: Date?
+    var billingPeriodEnd: Date?
+    var billingDays: Int?
+    var currentPeriodCharges: Decimal?
+    var usageQuantity: Decimal?
+    var usageUnit: String?
+
+    init(
+        id: UUID = UUID(),
+        utilityBill: UtilityBill,
+        utilityService: UtilityService,
+        billingPeriodStart: Date? = nil,
+        billingPeriodEnd: Date? = nil,
+        billingDays: Int? = nil,
+        currentPeriodCharges: Decimal? = nil,
+        usageQuantity: Decimal? = nil,
+        usageUnit: String? = nil
+    ) {
+        self.id = id
+        self.utilityBill = utilityBill
+        self.utilityService = utilityService
+        self.billingPeriodStart = billingPeriodStart
+        self.billingPeriodEnd = billingPeriodEnd
+        self.billingDays = billingDays
+        self.currentPeriodCharges = currentPeriodCharges
+        self.usageQuantity = usageQuantity
+        self.usageUnit = usageUnit
     }
 }
 

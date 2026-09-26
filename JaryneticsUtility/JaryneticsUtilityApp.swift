@@ -8,6 +8,7 @@ struct JaryneticsUtilityApp: App {
             Household.self,
             UtilityService.self,
             UtilityBill.self,
+            UtilityBillServiceDetail.self,
             SourceDocument.self,
         ])
         let configuration = ModelConfiguration(
