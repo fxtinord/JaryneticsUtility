@@ -3,7 +3,7 @@ import Foundation
 
 /// Provider-neutral meanings that may be supported by recognized bill evidence.
 /// These concepts classify source meaning only; they never carry trusted values.
-enum BillSemanticConcept: String, CaseIterable, Sendable {
+enum BillSemanticConcept: String, CaseIterable, Sendable, Hashable {
     case statementIdentity
     case billIssuer
     case statementDate
@@ -91,7 +91,32 @@ struct BillSemanticClassification: Sendable, Equatable {
 }
 
 protocol BillSemanticClassifying {
-    func classify(_ recognition: DocumentRecognitionResult) -> BillSemanticClassification
+    func classify(_ evidence: [BillSemanticEvidence]) -> BillSemanticClassification
+}
+
+extension BillSemanticClassifying {
+    func classify(_ recognition: DocumentRecognitionResult) -> BillSemanticClassification {
+        classify(BillSemanticEvidenceAdapter().evidence(from: recognition))
+    }
+}
+
+/// Converts recognition output into transient semantic evidence without adding
+/// interpretation, trusted values, persistence, or provider knowledge.
+struct BillSemanticEvidenceAdapter {
+    func evidence(from recognition: DocumentRecognitionResult) -> [BillSemanticEvidence] {
+        recognition.pages.flatMap { page in
+            page.lines.enumerated().map { sequenceIndex, line in
+                BillSemanticEvidence(
+                    pageIndex: page.pageIndex,
+                    sequenceIndex: sequenceIndex,
+                    sourceText: line.text,
+                    region: BillEvidenceRegion(
+                        normalizedBoundingBox: line.normalizedBoundingBox
+                    )
+                )
+            }
+        }
+    }
 }
 
 /// A deliberately small deterministic baseline proving that multiple source
@@ -104,20 +129,9 @@ struct DeterministicBillSemanticClassifier: BillSemanticClassifying {
         let reason: BillSemanticReason
     }
 
-    func classify(_ recognition: DocumentRecognitionResult) -> BillSemanticClassification {
-        let evidence = recognition.pages.flatMap { page in
-            page.lines.enumerated().map { sequenceIndex, line in
-                BillSemanticEvidence(
-                    pageIndex: page.pageIndex,
-                    sequenceIndex: sequenceIndex,
-                    sourceText: line.text,
-                    region: BillEvidenceRegion(
-                        normalizedBoundingBox: line.normalizedBoundingBox
-                    )
-                )
-            }
-        }
-        let contributions = evidence.flatMap(classify)
+    func classify(_ evidence: [BillSemanticEvidence]) -> BillSemanticClassification {
+        var contributions = evidence.flatMap(classify)
+        contributions += groupedRoleContributions(in: evidence)
         let concepts = contributions.map(\.concept).reduce(into: [BillSemanticConcept]()) {
             if !$0.contains($1) { $0.append($1) }
         }
@@ -152,7 +166,7 @@ struct DeterministicBillSemanticClassifier: BillSemanticClassifying {
     private func classify(_ evidence: BillSemanticEvidence) -> [Contribution] {
         let text = evidence.sourceText
         guard !matches(
-            #"\b(?:emergenc(?:y|ies)|outage|safety|customer\s+service|telephone|phone|contact|call)\b"#,
+            #"\b(?:emergenc(?:y|ies)|outage|safety|customer[\s-]+service|telephone|phone|contact|call|means|definition|defined|glossary|explanatory)\b|\bfor\s+example\b"#,
             in: text
         ) else {
             return []
@@ -177,6 +191,8 @@ struct DeterministicBillSemanticClassifier: BillSemanticClassifying {
         }
         if matches(#"\bdelivers\s+electricity\s+to\s+(?:your|the|a)\s+home\b"#, in: text) {
             add(.electricityService, .strong, .serviceDescription)
+            add(.deliveryUtility, .strong, .serviceDescription)
+            add(.deliveryCharges, .strong, .serviceDescription)
         }
         if matches(#"^\s*total\s+usage\s*\(\s*kwh\s*\)\s*$"#, in: text) {
             add(.electricityUsage, .strong, .usageHeading)
@@ -197,10 +213,10 @@ struct DeterministicBillSemanticClassifier: BillSemanticClassifying {
             add(.wastewaterService, .strong, .explicitServiceLabel)
         }
         if matches(#"^\s*supply\s*$"#, in: text) {
-            add(.supplyCharges, .strong, .chargeSectionHeading)
+            add(.supplyCharges, .moderate, .chargeSectionHeading)
         }
         if matches(#"^\s*delivery\s*$"#, in: text) {
-            add(.deliveryCharges, .strong, .chargeSectionHeading)
+            add(.deliveryCharges, .moderate, .chargeSectionHeading)
         }
         if matches(#"^\s*distribution\s*$"#, in: text) {
             add(.distributionCharges, .strong, .chargeSectionHeading)
@@ -208,8 +224,60 @@ struct DeterministicBillSemanticClassifier: BillSemanticClassifying {
         if matches(#"^\s*taxes\s*,\s*fees\s*&\s*other\s+credits\s*$"#, in: text) {
             add(.taxesFeesAndOtherCredits, .strong, .chargeSectionHeading)
         }
+        if matches(#"\bprovides\s+(?:your\s+)?energy\b"#, in: text) {
+            add(.energySupplier, .strong, .serviceDescription)
+            add(.supplyCharges, .strong, .serviceDescription)
+        }
+        if matches(#"^\s*service\s+from\s+\S+\s+through\s+\S+\s*$"#, in: text) {
+            add(.billingPeriod, .strong, .serviceDescription)
+        }
+        if matches(#"^\s*current\s+charges\s+summary\s*$"#, in: text) {
+            add(.currentCharges, .strong, .chargeSectionHeading)
+        }
+        if matches(#"^\s*meter\s+information\s*$"#, in: text) {
+            add(.meterInformation, .strong, .chargeSectionHeading)
+        }
+        if matches(#"^\s*budget\s+billing(?:\s+details)?\s*$"#, in: text) {
+            add(.budgetBilling, .strong, .explicitProgramLabel)
+        }
         if matches(#"^\s*(?:net\s+metered|net\s+metering|net\s+met(?:ering)?\s+cr(?:edit)?)\b"#, in: text) {
             add(.netMetering, .strong, .explicitProgramLabel)
+        }
+        return result
+    }
+
+    private func groupedRoleContributions(
+        in evidence: [BillSemanticEvidence]
+    ) -> [Contribution] {
+        var result: [Contribution] = []
+        for roleEvidence in evidence {
+            let role: (heading: String, concepts: [BillSemanticConcept])?
+            if matches(#"\bprovides\s+(?:your\s+)?energy\b"#, in: roleEvidence.sourceText) {
+                role = ("supply", [.supplyCharges, .energySupplier])
+            } else if matches(
+                #"\bdelivers\s+electricity\s+to\s+(?:your|the|a)\s+home\b"#,
+                in: roleEvidence.sourceText
+            ) {
+                role = ("delivery", [.deliveryCharges, .deliveryUtility])
+            } else {
+                role = nil
+            }
+            guard let role,
+                  let roleSequence = roleEvidence.sequenceIndex,
+                  let heading = evidence.last(where: {
+                      $0.pageIndex == roleEvidence.pageIndex
+                          && ($0.sequenceIndex ?? Int.min) < roleSequence
+                          && roleSequence - ($0.sequenceIndex ?? roleSequence) <= 3
+                          && matches(#"^\s*\#(role.heading)\s*$"#, in: $0.sourceText)
+                  }) else { continue }
+            for concept in role.concepts {
+                result.append(Contribution(
+                    concept: concept,
+                    confidence: .strong,
+                    evidence: heading,
+                    reason: .chargeSectionHeading
+                ))
+            }
         }
         return result
     }

@@ -219,6 +219,12 @@ private struct RecognitionResultView: View {
                     warningCount: result.warnings.count
                 )
                 ProposedDataSection(extraction: extraction)
+#if DEBUG
+                let semantics = DeterministicBillSemanticClassifier().classify(result)
+                if !semantics.candidates.isEmpty {
+                    SemanticInterpretationSection(classification: semantics)
+                }
+#endif
                 RecognitionTextSection(text: result.text)
             }
             .navigationTitle("Recognition Result")
@@ -232,6 +238,79 @@ private struct RecognitionResultView: View {
         }
     }
 }
+
+#if DEBUG
+private struct SemanticInterpretationSection: View {
+    let classification: BillSemanticClassification
+
+    var body: some View {
+        Section {
+            ForEach(classification.candidates, id: \.concept) { candidate in
+                VStack(alignment: .leading, spacing: 4) {
+                    LabeledContent(
+                        semanticLabel(candidate.concept),
+                        value: confidenceLabel(candidate.confidence)
+                    )
+                    Text(candidate.reasons.map(reasonLabel).joined(separator: ", "))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    ForEach(
+                        Array(candidate.supportingEvidence.enumerated()),
+                        id: \.offset
+                    ) { _, evidence in
+                        Text(provenanceLabel(evidence))
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        Text(evidence.sourceText)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .textSelection(.enabled)
+                    }
+                }
+            }
+        } header: {
+            Text("DEVELOPMENT / SEMANTIC INTERPRETATION")
+        } footer: {
+            Text("Semantic classifications are transient, unverified interpretations of source evidence. They are not extracted or customer-approved bill values.")
+        }
+    }
+
+    private func semanticLabel(_ concept: BillSemanticConcept) -> String {
+        concept.rawValue
+            .replacingOccurrences(
+                of: #"([a-z])([A-Z])"#,
+                with: "$1 $2",
+                options: .regularExpression
+            )
+            .capitalized
+    }
+
+    private func confidenceLabel(_ confidence: BillSemanticConfidence) -> String {
+        switch confidence {
+        case .strong: String(localized: "Strong evidence")
+        case .moderate: String(localized: "Moderate evidence")
+        case .weak: String(localized: "Weak evidence")
+        }
+    }
+
+    private func reasonLabel(_ reason: BillSemanticReason) -> String {
+        reason.rawValue
+            .replacingOccurrences(
+                of: #"([a-z])([A-Z])"#,
+                with: "$1 $2",
+                options: .regularExpression
+            )
+            .lowercased()
+    }
+
+    private func provenanceLabel(_ evidence: BillSemanticEvidence) -> String {
+        if let sequenceIndex = evidence.sequenceIndex {
+            return "Page \(evidence.pageIndex + 1) · Line \(sequenceIndex + 1)"
+        }
+        return "Page \(evidence.pageIndex + 1)"
+    }
+}
+#endif
 
 private struct ProposedDataSection: View {
     let extraction: BillExtractionResult
