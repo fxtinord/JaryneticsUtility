@@ -220,7 +220,7 @@ private struct RecognitionResultView: View {
                 )
                 ProposedDataSection(extraction: extraction)
 #if DEBUG
-                let semantics = DeterministicBillSemanticClassifier().classify(result)
+                let semantics = HybridBillSemanticClassifier().classify(result)
                 if !semantics.candidates.isEmpty {
                     SemanticInterpretationSection(classification: semantics)
                 }

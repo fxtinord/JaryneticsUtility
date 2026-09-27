@@ -61,6 +61,9 @@ enum BillSemanticReason: String, Sendable, Equatable {
     case usageStatement
     case chargeSectionHeading
     case explicitProgramLabel
+    case normalizedConceptEvidence
+    case semanticSimilarity
+    case hybridCorroboration
 }
 
 struct BillEvidenceRegion: Sendable, Equatable {
