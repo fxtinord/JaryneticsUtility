@@ -185,6 +185,7 @@ private struct ImportedBillRow: View {
     @ViewBuilder
     private var actionButtons: some View {
         Button("Preview", action: onPreview)
+            .buttonStyle(.borderless)
         Button(action: onRecognize) {
             if isRecognizing {
                 ProgressView()
@@ -193,6 +194,7 @@ private struct ImportedBillRow: View {
                 Text("Recognize Text")
             }
         }
+        .buttonStyle(.borderless)
         .disabled(isRecognizing)
     }
 }
@@ -285,6 +287,10 @@ private struct ProposedDataSection: View {
             } footer: {
                 Text("Service proposals are unverified, transient, and have not changed the saved bill.")
             }
+
+            if let distributedEnergy = group.distributedEnergy {
+                DistributedEnergyProposalSection(group: distributedEnergy)
+            }
         }
     }
 
@@ -296,6 +302,27 @@ private struct ProposedDataSection: View {
             String(localized: "Natural gas")
         case .waterWastewater:
             String(localized: "Water/wastewater")
+        }
+    }
+}
+
+private struct DistributedEnergyProposalSection: View {
+    let group: BillDistributedEnergyProposalGroup
+
+    var body: some View {
+        Section {
+            ForEach(group.proposals) { proposal in
+                ProposedFieldRow(
+                    label: proposal.field.rawValue,
+                    value: proposal.value,
+                    provenance: proposal.provenance,
+                    origin: proposal.origin
+                )
+            }
+        } header: {
+            Text("DEVELOPMENT / PROPOSED DISTRIBUTED ENERGY — Electricity")
+        } footer: {
+            Text("Distributed-energy proposals are unverified, transient, and have not changed the saved bill.")
         }
     }
 }
@@ -321,6 +348,8 @@ private struct ProposedFieldRow: View {
 
     private func displayValue(_ value: BillProposedValue) -> String {
         switch value {
+        case .boolean(let boolean):
+            boolean ? String(localized: "Yes") : String(localized: "No")
         case .date(let date):
             BillDateOnlyPresentation.string(from: date)
         case .decimal(let decimal):

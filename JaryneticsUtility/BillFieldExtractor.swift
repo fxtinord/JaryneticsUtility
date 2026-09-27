@@ -2,6 +2,7 @@ import CoreGraphics
 import Foundation
 
 enum BillStatementFieldName: String, CaseIterable, Sendable {
+    case billIssuer = "Bill issuer"
     case statementDate = "Statement date"
     case amountDue = "Total amount due"
     case dueDate = "Due date"
@@ -16,7 +17,18 @@ enum BillServiceFieldName: String, CaseIterable, Sendable {
     case usageUnit = "Usage unit"
 }
 
+enum BillDistributedEnergyFieldName: String, CaseIterable, Sendable {
+    case isNetMetered = "Net metered"
+    case netEnergyQuantity = "Net energy quantity"
+    case netEnergyUnit = "Net energy unit"
+    case priorEnergyCreditBalance = "Prior energy-credit balance"
+    case newEnergyCreditBalance = "New energy-credit balance"
+    case energyCreditUnit = "Energy-credit unit"
+    case settlementMonth = "Settlement month"
+}
+
 enum BillProposedValue: Sendable, Equatable {
+    case boolean(Bool)
     case date(Date)
     case decimal(Decimal)
     case integer(Int)
@@ -52,12 +64,32 @@ struct BillServiceFieldProposal: Sendable, Equatable, Identifiable {
     let origin: BillProposalOrigin
 }
 
+struct BillDistributedEnergyFieldProposal: Sendable, Equatable, Identifiable {
+    var id: BillDistributedEnergyFieldName { field }
+
+    let field: BillDistributedEnergyFieldName
+    let value: BillProposedValue
+    let provenance: BillSourceProvenance
+    let origin: BillProposalOrigin
+}
+
+struct BillDistributedEnergyProposalGroup: Sendable, Equatable {
+    let proposals: [BillDistributedEnergyFieldProposal]
+
+    func proposal(
+        for field: BillDistributedEnergyFieldName
+    ) -> BillDistributedEnergyFieldProposal? {
+        proposals.first { $0.field == field }
+    }
+}
+
 struct BillServiceProposalGroup: Sendable, Equatable, Identifiable {
     var id: UtilityServiceType { serviceType }
 
     let serviceType: UtilityServiceType
     let serviceIdentityProvenance: BillSourceProvenance
     let proposals: [BillServiceFieldProposal]
+    let distributedEnergy: BillDistributedEnergyProposalGroup?
 
     func proposal(for field: BillServiceFieldName) -> BillServiceFieldProposal? {
         proposals.first { $0.field == field }
@@ -93,6 +125,16 @@ struct BillFieldExtractor {
     private struct UsageValue: Equatable {
         let quantity: Decimal
         let unit: String
+    }
+
+    private struct EnergyValue: Equatable {
+        let quantity: Decimal
+        let unit: String
+    }
+
+    private struct BillIssuerIdentity {
+        let canonicalName: String
+        let evidencePatterns: [String]
     }
 
     private struct SourceLine {
@@ -131,8 +173,26 @@ struct BillFieldExtractor {
 
     private static let datePattern = #"(?:\d{1,2}/\d{1,2}/(?:\d{4}|\d{2})\b|(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:t(?:ember)?)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\s+\d{1,2},\s+\d{4})"#
     private static let moneyPattern = #"\$?\s*([0-9]{1,3}(?:,[0-9]{3})*|[0-9]+)\.([0-9]{2})"#
-    private static let usageValuePattern = #"\b[0-9]+(?:,[0-9]{3})*(?:\.\d+)?\s*(?:kwh|therms?|ccf|gallons?|gal|water\s+units?)\b"#
+    private static let usageValuePattern = #"(?<![-+])\b[0-9]+(?:,[0-9]{3})*(?:\.\d+)?\s*(?:kwh|therms?|ccf|gallons?|gal|water\s+units?)\b"#
     private static let nonCurrentContextPattern = #"\b(?:previous|prior|historical|history|past[\s-]+due|average|daily|comparison|comparative|compare|last\s+(?:month|period|year)|year[\s-]+over[\s-]+year)\b"#
+    private static let nonBillingServiceContextPattern = #"\b(?:emergenc(?:y|ies)|outage|safety|customer\s+service|telephone|phone|contact|call|means|definition|defined|example|glossary)\b"#
+    private static let issuerIdentities = [
+        BillIssuerIdentity(
+            canonicalName: "National Grid",
+            evidencePatterns: [
+                #"\bnational\s+grid\b"#,
+                #"\b(?:www\.)?nationalgrid(?:us)?\.com\b"#,
+            ]
+        ),
+        BillIssuerIdentity(
+            canonicalName: "PG&E",
+            evidencePatterns: [
+                #"\bpg\s*&\s*e\b"#,
+                #"\bpacific\s+gas\s+and\s+electric(?:\s+company)?\b"#,
+                #"\b(?:www\.)?pge\.com\b"#,
+            ]
+        ),
+    ]
 
     func extract(from recognition: DocumentRecognitionResult) -> BillExtractionResult {
         let documentLines = sourceLines(in: recognition)
@@ -150,6 +210,7 @@ struct BillFieldExtractor {
     private func extractStatementProposals(
         from lines: [SourceLine]
     ) -> [BillStatementFieldProposal] {
+        let billIssuer = uniqueBillIssuer(in: lines)
         let statementDate = uniqueDate(
             in: lines,
             labelPattern: #"\bstatement\s+date\b"#
@@ -165,6 +226,7 @@ struct BillFieldExtractor {
         )
 
         var proposals: [BillStatementFieldProposal] = []
+        appendStatement(billIssuer, field: .billIssuer, to: &proposals) { .text($0) }
         appendStatement(statementDate, field: .statementDate, to: &proposals) { .date($0) }
         appendStatement(amountDue, field: .amountDue, to: &proposals) { .decimal($0) }
         appendStatement(dueDate, field: .dueDate, to: &proposals) { .date($0) }
@@ -233,15 +295,137 @@ struct BillFieldExtractor {
         return BillServiceProposalGroup(
             serviceType: serviceLines.serviceType,
             serviceIdentityProvenance: serviceLines.identityProvenance,
-            proposals: proposals
+            proposals: proposals,
+            distributedEnergy: extractDistributedEnergy(
+                from: serviceLines
+            )
         )
+    }
+
+    private func extractDistributedEnergy(
+        from serviceLines: ServiceLines
+    ) -> BillDistributedEnergyProposalGroup? {
+        guard serviceLines.serviceType == .electricity else { return nil }
+
+        let netMetered: Candidate<Bool>? = uniqueCandidate(in: serviceLines.lines) { line in
+            guard isEligibleCurrentLine(line.text),
+                  isNetMeteringContextLabel(line.text) else {
+                return nil
+            }
+            return true
+        }
+        var netEnergyCandidates = energyCandidates(
+            in: serviceLines.lines,
+            labelMatches: isNetMeteredLabel
+        )
+        if netMetered != nil {
+            netEnergyCandidates += energyCandidates(
+                in: serviceLines.lines,
+                labelMatches: isTotalUsageLabel,
+                directValueParser: explicitlySignedEnergyValue,
+                splitValueParser: standaloneExplicitlySignedEnergyValue
+            )
+            if netEnergyCandidates.isEmpty {
+                // Some net-metering summaries place one signed current-period
+                // kWh value apart from the later Net Met Cr label. Accept only
+                // a unique standalone signed value; rate expressions, money,
+                // unsigned OCR and descriptive/history lines do not qualify.
+                let creditContextPages = Set(serviceLines.lines.compactMap { source in
+                    isEligibleCurrentLine(source.line.text)
+                        && isNetMeteringCreditLabel(source.line.text)
+                        ? source.pageIndex : nil
+                })
+                let standalone: [Candidate<EnergyValue>] = candidates(
+                    in: serviceLines.lines.filter { creditContextPages.contains($0.pageIndex) }
+                ) { line in
+                    guard isEligibleCurrentLine(line.text),
+                          !matches(
+                            #"\b(?:meter\s+reading|rate|calculation|example|tier|comparison)\b|[$•]"#,
+                            in: line.text
+                          ) else { return nil }
+                    return standaloneExplicitlySignedEnergyValue(in: line.text)
+                }
+                if let uniqueStandalone = unique(standalone) {
+                    netEnergyCandidates.append(uniqueStandalone)
+                }
+            }
+        }
+        let netEnergy = unique(netEnergyCandidates)
+        let priorCredit = unique(energyCandidates(
+            in: serviceLines.lines,
+            labelMatches: isPriorEnergyCreditLabel
+        ))
+        let newCredit = unique(energyCandidates(
+            in: serviceLines.lines,
+            labelMatches: isNewEnergyCreditLabel
+        ))
+        let settlementMonth = uniqueSettlementMonth(in: serviceLines.lines)
+
+        var proposals: [BillDistributedEnergyFieldProposal] = []
+        appendDistributedEnergy(netMetered, field: .isNetMetered, to: &proposals) {
+            .boolean($0)
+        }
+        if let netEnergy {
+            proposals.append(distributedEnergyProposal(
+                .netEnergyQuantity,
+                .decimal(netEnergy.value.quantity),
+                netEnergy.provenance
+            ))
+            proposals.append(distributedEnergyProposal(
+                .netEnergyUnit,
+                .text(netEnergy.value.unit),
+                netEnergy.provenance
+            ))
+        }
+        appendDistributedEnergy(
+            priorCredit.map { Candidate(value: $0.value.quantity, provenance: $0.provenance) },
+            field: .priorEnergyCreditBalance,
+            to: &proposals
+        ) { .decimal($0) }
+        appendDistributedEnergy(
+            newCredit.map { Candidate(value: $0.value.quantity, provenance: $0.provenance) },
+            field: .newEnergyCreditBalance,
+            to: &proposals
+        ) { .decimal($0) }
+
+        let creditUnits = [priorCredit, newCredit].compactMap { candidate in
+            candidate.map {
+                Candidate(value: $0.value.unit, provenance: $0.provenance)
+            }
+        }
+        appendDistributedEnergy(
+            unique(creditUnits),
+            field: .energyCreditUnit,
+            to: &proposals
+        ) { .text($0) }
+        appendDistributedEnergy(
+            settlementMonth,
+            field: .settlementMonth,
+            to: &proposals
+        ) { .integer($0) }
+
+        return proposals.isEmpty
+            ? nil
+            : BillDistributedEnergyProposalGroup(proposals: proposals)
     }
 
     private func scopedServiceLines(
         in recognition: DocumentRecognitionResult
     ) -> [ServiceLines] {
-        var groups: [UtilityServiceType: ServiceLines] = [:]
-        var order: [UtilityServiceType] = []
+        let documentEvidence = documentServiceEvidence(in: recognition)
+        let order = documentEvidence.map(\.serviceType)
+        var groups = documentEvidence.reduce(into: [UtilityServiceType: ServiceLines]()) {
+            result, evidence in
+            result[evidence.serviceType] = ServiceLines(
+                serviceType: evidence.serviceType,
+                identityProvenance: provenance(
+                    pageIndex: evidence.sourceLine.pageIndex,
+                    line: evidence.sourceLine.line
+                ),
+                lines: []
+            )
+        }
+        let inheritedType = order.count == 1 ? order.first : nil
 
         for page in recognition.pages {
             let eligibleLines = page.lines.compactMap { line in
@@ -261,21 +445,21 @@ struct BillFieldExtractor {
                     result.append(type)
                 }
             }
-            var currentType = distinctTypes.count == 1 ? distinctTypes.first : nil
+            var currentType: UtilityServiceType?
+            switch distinctTypes.count {
+            case 0:
+                currentType = inheritedType
+            case 1:
+                currentType = distinctTypes.first
+            default:
+                currentType = nil
+            }
 
             for sourceLine in eligibleLines {
                 let line = sourceLine.line
                 switch serviceTypeMatch(in: line.text) {
                 case .identified(let type):
                     currentType = type
-                    if groups[type] == nil {
-                        order.append(type)
-                        groups[type] = ServiceLines(
-                            serviceType: type,
-                            identityProvenance: provenance(pageIndex: page.pageIndex, line: line),
-                            lines: []
-                        )
-                    }
                 case .ambiguous:
                     currentType = nil
                     continue
@@ -284,23 +468,6 @@ struct BillFieldExtractor {
                 }
 
                 guard let currentType else { continue }
-                if groups[currentType] == nil,
-                   let identityLine = eligibleLines.first(where: {
-                       if case .identified(currentType) = serviceTypeMatch(in: $0.line.text) {
-                           return true
-                       }
-                       return false
-                   }) {
-                    order.append(currentType)
-                    groups[currentType] = ServiceLines(
-                        serviceType: currentType,
-                        identityProvenance: provenance(
-                            pageIndex: page.pageIndex,
-                            line: identityLine.line
-                        ),
-                        lines: []
-                    )
-                }
                 groups[currentType]?.lines.append(sourceLine)
             }
         }
@@ -308,16 +475,53 @@ struct BillFieldExtractor {
         return order.compactMap { groups[$0] }
     }
 
+    private func documentServiceEvidence(
+        in recognition: DocumentRecognitionResult
+    ) -> [(serviceType: UtilityServiceType, sourceLine: SourceLine)] {
+        var evidence: [(UtilityServiceType, SourceLine)] = []
+        for page in recognition.pages {
+            for line in page.lines where isEligibleCurrentLine(line.text) {
+                guard case .identified(let type) = serviceTypeMatch(in: line.text),
+                      !evidence.contains(where: { $0.0 == type }) else {
+                    continue
+                }
+                evidence.append((type, SourceLine(pageIndex: page.pageIndex, line: line)))
+            }
+        }
+        return evidence
+    }
+
     private func serviceTypeMatch(in text: String) -> ServiceTypeMatch {
+        guard !matches(Self.nonBillingServiceContextPattern, in: text) else {
+            return .none
+        }
+
         var matchesByType: [UtilityServiceType] = []
-        if matches(#"\belectric(?:ity)?\b"#, in: text) {
+        if isNetMeteringContextLabel(text) || matches(
+            #"^\s*(?:(?:electricity|electric)\s*$|electric(?:ity)?\s+service\b|details?\s+of\s+electric(?:ity)?\s+charges\b|(?:current|total)\s+electric(?:ity)?\s+charges\b|electric(?:ity)?\s+usage\b)"#,
+            in: text
+        ) {
             matchesByType.append(.electricity)
         }
-        if matches(#"\bnatural\s+gas\b|\bgas\b"#, in: text) {
+        if matches(
+            #"^\s*(?:(?:natural\s+gas|gas)\s*$|(?:natural\s+)?gas\s+service\b|details?\s+of\s+(?:natural\s+)?gas\s+charges\b|(?:current|total)\s+(?:natural\s+)?gas\s+charges\b|(?:natural\s+)?gas\s+usage\b)"#,
+            in: text
+        ) {
             matchesByType.append(.naturalGas)
         }
-        if matches(#"\bwater\b|\bwastewater\b"#, in: text) {
+        if matches(
+            #"^\s*(?:(?:water(?:\s*/\s*wastewater)?|wastewater)\s*$|(?:water(?:\s*/\s*wastewater)?|wastewater)\s+(?:service|usage)\b|details?\s+of\s+(?:water(?:\s*/\s*wastewater)?|wastewater)\s+charges\b|(?:current|total)\s+(?:water(?:\s*/\s*wastewater)?|wastewater)\s+charges\b)"#,
+            in: text
+        ) {
             matchesByType.append(.waterWastewater)
+        }
+
+        let mentionsElectricity = matches(#"\belectric(?:ity)?\b"#, in: text)
+        let mentionsGas = matches(#"\bnatural\s+gas\b|\bgas\b"#, in: text)
+        if mentionsElectricity,
+           mentionsGas,
+           matches(#"\b(?:service|charges|usage)\b"#, in: text) {
+            return .ambiguous
         }
 
         switch matchesByType.count {
@@ -327,6 +531,18 @@ struct BillFieldExtractor {
             return .identified(matchesByType[0])
         default:
             return .ambiguous
+        }
+    }
+
+    private func uniqueBillIssuer(in lines: [SourceLine]) -> Candidate<String>? {
+        uniqueCandidate(in: lines) { line in
+            let identities = Self.issuerIdentities.filter { identity in
+                identity.evidencePatterns.contains { pattern in
+                    matches(pattern, in: line.text)
+                }
+            }
+            guard identities.count == 1 else { return nil }
+            return identities[0].canonicalName
         }
     }
 
@@ -447,6 +663,170 @@ struct BillFieldExtractor {
         return unique(directCandidates + splitCandidates)
     }
 
+    private func energyCandidates(
+        in lines: [SourceLine],
+        labelMatches: (String) -> Bool,
+        directValueParser: ((String) -> EnergyValue?)? = nil,
+        splitValueParser: ((String) -> EnergyValue?)? = nil
+    ) -> [Candidate<EnergyValue>] {
+        let directParser = directValueParser ?? energyValue
+        let splitParser = splitValueParser ?? standaloneEnergyValue
+        let directCandidates: [Candidate<EnergyValue>] = lines.compactMap { source in
+            guard isEligibleCurrentLine(source.line.text), labelMatches(source.line.text) else {
+                return nil
+            }
+            if let refinement = source.line.rowRefinement {
+                guard refinement.kind == .signedEnergy,
+                      let text = refinement.valueText,
+                      let value = explicitlySignedEnergyValue(in: text) else { return nil }
+                let valueLine = RecognizedDocumentLine(
+                    text: text,
+                    normalizedBoundingBox: refinement.normalizedBoundingBox
+                        ?? source.line.normalizedBoundingBox
+                )
+                return Candidate(value: value, provenance: combinedProvenance(
+                    label: source,
+                    value: SourceLine(pageIndex: source.pageIndex, line: valueLine)
+                ))
+            }
+            guard let value = directParser(source.line.text) else { return nil }
+            return Candidate(value: value, provenance: provenance(
+                pageIndex: source.pageIndex,
+                line: source.line
+            ))
+        }
+        let splitCandidates = distributedEnergySplitCandidates(
+            in: lines,
+            labelMatches: labelMatches,
+            valueParser: splitParser
+        )
+        return directCandidates + splitCandidates
+    }
+
+    private func uniqueSettlementMonth(in lines: [SourceLine]) -> Candidate<Int>? {
+        let directCandidates: [Candidate<Int>] = lines.compactMap { source in
+            let line = source.line
+            guard isEligibleCurrentLine(line.text), isSettlementMonthLabel(line.text) else {
+                return nil
+            }
+            if let refinement = line.rowRefinement {
+                guard refinement.kind == .settlementMonth,
+                      let text = refinement.valueText,
+                      let value = standaloneSettlementMonth(in: text) else { return nil }
+                let valueLine = RecognizedDocumentLine(
+                    text: text,
+                    normalizedBoundingBox: refinement.normalizedBoundingBox
+                        ?? line.normalizedBoundingBox
+                )
+                return Candidate(value: value, provenance: combinedProvenance(
+                    label: source,
+                    value: SourceLine(pageIndex: source.pageIndex, line: valueLine)
+                ))
+            }
+            guard
+                  let valueText = firstCapture(
+                    #"^(?:\s*)(?:anniversary|settlement|true[\s-]*up)\s+month\s*[:\-]?\s*(\d{1,2})\b"#,
+                    in: line.text
+                  ),
+                  let value = Int(valueText),
+                  (1...12).contains(value) else {
+                return nil
+            }
+            return Candidate(value: value, provenance: provenance(
+                pageIndex: source.pageIndex,
+                line: line
+            ))
+        }
+        let splitCandidates = splitCandidates(
+            in: lines,
+            valueLines: lines,
+            labelMatches: isSettlementMonthLabel,
+            valueParser: standaloneSettlementMonth
+        )
+        return unique(directCandidates + splitCandidates)
+    }
+
+    /// Distributed-energy tables use short, repeated rows. Match by vertical
+    /// overlap first, otherwise by center distance measured in text heights.
+    /// A match must be mutually closest, clearly separated by 0.35 line height
+    /// from a runner-up, and a value can therefore belong to only one row.
+    private func distributedEnergySplitCandidates(
+        in lines: [SourceLine],
+        labelMatches: (String) -> Bool,
+        valueParser: (String) -> EnergyValue?
+    ) -> [Candidate<EnergyValue>] {
+        let allLabels = lines.filter {
+            isEligibleCurrentLine($0.line.text)
+                && isDistributedEnergyRowLabel($0.line.text)
+                && $0.line.rowRefinement == nil
+        }
+        let targetLabels = allLabels.filter { labelMatches($0.line.text) }
+        let values = lines.compactMap { source -> (SourceLine, EnergyValue)? in
+            guard isEligibleCurrentLine(source.line.text),
+                  let value = valueParser(source.line.text) else { return nil }
+            return (source, value)
+        }
+
+        return targetLabels.compactMap { label in
+            let matches = values.compactMap { value -> (SourceLine, EnergyValue, RowScore)? in
+                guard value.0.pageIndex == label.pageIndex,
+                      let score = distributedEnergyRowScore(
+                        label: label.line.normalizedBoundingBox,
+                        value: value.0.line.normalizedBoundingBox
+                      ) else { return nil }
+                return (value.0, value.1, score)
+            }.sorted { $0.2 < $1.2 }
+            guard let best = matches.first,
+                  matches.count == 1 || best.2.isClearlyBetter(than: matches[1].2) else {
+                return nil
+            }
+            let competingLabels = allLabels.compactMap { other -> (SourceLine, RowScore)? in
+                guard other.pageIndex == best.0.pageIndex,
+                      let score = distributedEnergyRowScore(
+                        label: other.line.normalizedBoundingBox,
+                        value: best.0.line.normalizedBoundingBox
+                      ) else { return nil }
+                return (other, score)
+            }.sorted { $0.1 < $1.1 }
+            guard let owner = competingLabels.first,
+                  isSameSourceLine(owner.0, label),
+                  competingLabels.count == 1 || owner.1.isClearlyBetter(than: competingLabels[1].1)
+            else { return nil }
+            return Candidate(value: best.1, provenance: combinedProvenance(label: label, value: best.0))
+        }
+    }
+
+    private struct RowScore: Comparable {
+        let overlapRank: Int
+        let normalizedCenterDistance: CGFloat
+
+        static func < (lhs: RowScore, rhs: RowScore) -> Bool {
+            (lhs.overlapRank, lhs.normalizedCenterDistance)
+                < (rhs.overlapRank, rhs.normalizedCenterDistance)
+        }
+
+        func isClearlyBetter(than other: RowScore) -> Bool {
+            overlapRank < other.overlapRank
+                || (overlapRank == other.overlapRank
+                    && other.normalizedCenterDistance - normalizedCenterDistance >= 0.35)
+        }
+    }
+
+    private func distributedEnergyRowScore(label: CGRect, value: CGRect) -> RowScore? {
+        guard value.midX >= label.midX - LayoutAssociationRule.leadingTolerance,
+              max(0, value.minX - label.maxX) <= LayoutAssociationRule.maximumHorizontalGap else {
+            return nil
+        }
+        let overlap = max(0, min(label.maxY, value.maxY) - max(label.minY, value.minY))
+        let scale = max(min(label.height, value.height), 0.0001)
+        let distance = abs(label.midY - value.midY) / scale
+        if overlap > 0 {
+            return RowScore(overlapRank: 0, normalizedCenterDistance: distance)
+        }
+        guard distance <= 1.75 else { return nil }
+        return RowScore(overlapRank: 1, normalizedCenterDistance: distance)
+    }
+
     private func moneyValue(in text: String) -> Decimal? {
         let amountTexts = allMatches(Self.moneyPattern, in: text)
         guard amountTexts.count == 1, let amountText = amountTexts.first else {
@@ -479,6 +859,106 @@ struct BillFieldExtractor {
             #"^\s*(?:(?:electricity|electric|natural\s+gas|gas|water|wastewater)\s+)?(?:total\s+)?usage(?:\s+this\s+period)?\b"#,
             in: text
         )
+    }
+
+    private func isNetMeteredLabel(_ text: String) -> Bool {
+        matches(#"^\s*net\s+metered\b"#, in: text)
+    }
+
+    private func isNetMeteringCreditLabel(_ text: String) -> Bool {
+        matches(#"^\s*net\s+met(?:ering)?\s+cr(?:edit)?\b"#, in: text)
+    }
+
+    private func isNetMeteringContextLabel(_ text: String) -> Bool {
+        isNetMeteredLabel(text) || isNetMeteringCreditLabel(text)
+    }
+
+    private func isPriorEnergyCreditLabel(_ text: String) -> Bool {
+        matches(#"^\s*cumulative\s+(?:energy\s+)?credit\b"#, in: text)
+    }
+
+    private func isNewEnergyCreditLabel(_ text: String) -> Bool {
+        matches(#"^\s*new\s+cumulative\s+(?:energy\s+)?credit\b"#, in: text)
+    }
+
+    private func isSettlementMonthLabel(_ text: String) -> Bool {
+        matches(
+            #"^\s*(?:anniversary|settlement|true[\s-]*up)\s+month\b"#,
+            in: text
+        )
+    }
+
+    private func isTotalUsageLabel(_ text: String) -> Bool {
+        matches(#"^\s*total\s+usage\b"#, in: text)
+    }
+
+    private func isDistributedEnergyRowLabel(_ text: String) -> Bool {
+        isNetMeteringContextLabel(text)
+            || isPriorEnergyCreditLabel(text)
+            || isNewEnergyCreditLabel(text)
+            || isTotalUsageLabel(text)
+    }
+
+    private func energyValue(in text: String) -> EnergyValue? {
+        let values = allMatches(
+            #"[+-]?[0-9]+(?:,[0-9]{3})*(?:\.\d+)?\s*kwh\b"#,
+            in: text
+        )
+        guard values.count == 1,
+              let valueText = values.first,
+              let quantityText = firstCapture(
+                #"([+-]?[0-9]+(?:,[0-9]{3})*(?:\.\d+)?)\s*kwh\b"#,
+                in: valueText
+              ),
+              let quantity = Decimal(
+                string: quantityText.replacingOccurrences(of: ",", with: ""),
+                locale: Locale(identifier: "en_US_POSIX")
+              ) else {
+            return nil
+        }
+        return EnergyValue(quantity: quantity, unit: "kWh")
+    }
+
+    private func standaloneEnergyValue(in text: String) -> EnergyValue? {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard matches(
+            #"^[+-]?[0-9]+(?:,[0-9]{3})*(?:\.\d+)?\s*kwh$"#,
+            in: trimmed
+        ) else {
+            return nil
+        }
+        return energyValue(in: trimmed)
+    }
+
+    private func explicitlySignedEnergyValue(in text: String) -> EnergyValue? {
+        guard matches(
+            #"[+-][0-9]+(?:,[0-9]{3})*(?:\.\d+)?\s*kwh\b"#,
+            in: text
+        ) else {
+            return nil
+        }
+        return energyValue(in: text)
+    }
+
+    private func standaloneExplicitlySignedEnergyValue(in text: String) -> EnergyValue? {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard matches(
+            #"^[+-][0-9]+(?:,[0-9]{3})*(?:\.\d+)?\s*kwh$"#,
+            in: trimmed
+        ) else {
+            return nil
+        }
+        return energyValue(in: trimmed)
+    }
+
+    private func standaloneSettlementMonth(in text: String) -> Int? {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard matches(#"^\d{1,2}$"#, in: trimmed),
+              let value = Int(trimmed),
+              (1...12).contains(value) else {
+            return nil
+        }
+        return value
     }
 
     private func usageValue(in text: String) -> UsageValue? {
@@ -537,7 +1017,8 @@ struct BillFieldExtractor {
         valueLines: [SourceLine],
         labelMatches: (String) -> Bool,
         valueParser: (String) -> Value?,
-        explicitlyScopedService: UtilityServiceType? = nil
+        explicitlyScopedService: UtilityServiceType? = nil,
+        reservedSameRowLabelMatches: ((String) -> Bool)? = nil
     ) -> [Candidate<Value>] {
         lines.compactMap { labelSource in
             guard isEligibleCurrentLine(labelSource.line.text),
@@ -564,6 +1045,19 @@ struct BillFieldExtractor {
                       let value = valueParser(valueSource.line.text) else {
                     return nil
                 }
+                if tier == .stacked,
+                   let reservedSameRowLabelMatches,
+                   candidateValueLines.contains(where: { otherLabel in
+                       !isSameSourceLine(otherLabel, labelSource)
+                           && otherLabel.pageIndex == valueSource.pageIndex
+                           && reservedSameRowLabelMatches(otherLabel.line.text)
+                           && layoutAssociationTier(
+                            label: otherLabel.line.normalizedBoundingBox,
+                            value: valueSource.line.normalizedBoundingBox
+                           ) == .sameRow
+                   }) {
+                    return nil
+                }
                 return (value, valueSource, tier)
             }
             let sameRowValues = associatedValues.filter { $0.2 == .sameRow }
@@ -582,6 +1076,10 @@ struct BillFieldExtractor {
                 )
             )
         }
+    }
+
+    private func isSameSourceLine(_ lhs: SourceLine, _ rhs: SourceLine) -> Bool {
+        lhs.pageIndex == rhs.pageIndex && lhs.line == rhs.line
     }
 
     private func unique<Value: Equatable>(
@@ -665,6 +1163,20 @@ struct BillFieldExtractor {
         )
     }
 
+    private func distributedEnergyProposal(
+        _ field: BillDistributedEnergyFieldName,
+        _ value: BillProposedValue,
+        _ provenance: BillSourceProvenance,
+        origin: BillProposalOrigin = .extracted
+    ) -> BillDistributedEnergyFieldProposal {
+        BillDistributedEnergyFieldProposal(
+            field: field,
+            value: value,
+            provenance: provenance,
+            origin: origin
+        )
+    }
+
     private func appendStatement<Value>(
         _ candidate: Candidate<Value>?,
         field: BillStatementFieldName,
@@ -683,6 +1195,20 @@ struct BillFieldExtractor {
     ) {
         guard let candidate else { return }
         proposals.append(serviceProposal(field, value(candidate.value), candidate.provenance))
+    }
+
+    private func appendDistributedEnergy<Value>(
+        _ candidate: Candidate<Value>?,
+        field: BillDistributedEnergyFieldName,
+        to proposals: inout [BillDistributedEnergyFieldProposal],
+        value: (Value) -> BillProposedValue
+    ) {
+        guard let candidate else { return }
+        proposals.append(distributedEnergyProposal(
+            field,
+            value(candidate.value),
+            candidate.provenance
+        ))
     }
 
     private func provenance(

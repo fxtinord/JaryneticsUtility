@@ -83,6 +83,10 @@ If the authorized task appears to require one of these, stop and report the need
   request permission and explain why.
 - Do not work around a denied permission.
 
+## Repository inspection commands
+- Codex may run read-only Git inspection commands including git status, git diff, git log, git show, and git branch --show-current without separate task authorization. Run these individually when necessary to remain within Xcode's standing command permissions. Git commands that modify repository state remain prohibited unless explicitly authorized by the user.
+- For branch verification, use git status --short --branch rather than git branch --show-current. Prefer repository-inspection commands already included in Xcode's standing Allowed Commands list. Do not request broader Git command-family authorization merely to avoid a permission prompt.
+
 ## Mandatory Completion Handoff
 
 At the end of every implementation task, provide the complete handoff below. Do not end the task after Build/Test completion. Before considering the task complete, you MUST emit the full Mandatory Completion Handoff in the conversation. A task is incomplete until that handoff has been provided:
