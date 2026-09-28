@@ -71,6 +71,77 @@ struct RecognitionWarning: Sendable, Equatable {
 struct RecognitionPageInput: Sendable, Equatable {
     let pageIndex: Int
     let imageData: Data
+    let normalizedRegion: CGRect
+
+    init(pageIndex: Int, imageData: Data, normalizedRegion: CGRect = Self.fullPageRegion) {
+        self.pageIndex = pageIndex
+        self.imageData = imageData
+        self.normalizedRegion = normalizedRegion
+    }
+
+    static let fullPageRegion = CGRect(x: 0, y: 0, width: 1, height: 1)
+}
+
+/// Plans internal OCR windows while preserving the source PDF's physical page.
+/// Ordinary pages remain a single region. Extreme portrait pages are bounded by
+/// raster height; extreme landscape pages are bounded by source-region aspect.
+struct RecognitionRegionPlanner {
+    let renderWidth: CGFloat
+    let maximumRegionPixelDimension: CGFloat
+    let maximumRegionAspectRatio: CGFloat
+    let overlapFraction: CGFloat
+
+    init(
+        renderWidth: CGFloat = 2_000,
+        maximumRegionPixelDimension: CGFloat = 4_096,
+        maximumRegionAspectRatio: CGFloat = 2.0,
+        overlapFraction: CGFloat = 0.08
+    ) {
+        self.renderWidth = renderWidth
+        self.maximumRegionPixelDimension = maximumRegionPixelDimension
+        self.maximumRegionAspectRatio = maximumRegionAspectRatio
+        self.overlapFraction = overlapFraction
+    }
+
+    func regions(for pageSize: CGSize) -> [CGRect] {
+        guard pageSize.width > 0, pageSize.height > 0 else { return [] }
+        let fullRasterHeight = renderWidth * pageSize.height / pageSize.width
+        if fullRasterHeight > maximumRegionPixelDimension {
+            return windows(
+                along: .vertical,
+                normalizedLength: maximumRegionPixelDimension / fullRasterHeight
+            )
+        }
+        let landscapeAspect = pageSize.width / pageSize.height
+        if landscapeAspect > maximumRegionAspectRatio {
+            return windows(
+                along: .horizontal,
+                normalizedLength: maximumRegionAspectRatio / landscapeAspect
+            )
+        }
+        return [RecognitionPageInput.fullPageRegion]
+    }
+
+    private enum Axis { case horizontal, vertical }
+
+    private func windows(along axis: Axis, normalizedLength: CGFloat) -> [CGRect] {
+        let length = min(max(normalizedLength, 0.1), 1)
+        let step = length * (1 - overlapFraction)
+        var starts: [CGFloat] = [0]
+        while let last = starts.last, last + length < 1 {
+            let next = min(last + step, 1 - length)
+            guard next > last else { break }
+            starts.append(next)
+        }
+        return starts.map { start in
+            switch axis {
+            case .horizontal:
+                CGRect(x: start, y: 0, width: length, height: 1)
+            case .vertical:
+                CGRect(x: 0, y: start, width: 1, height: length)
+            }
+        }
+    }
 }
 
 enum DocumentRecognitionError: LocalizedError, Equatable {
@@ -98,9 +169,14 @@ enum DocumentRecognitionError: LocalizedError, Equatable {
 
 struct SourceDocumentPageLoader {
     private let pdfRenderWidth: CGFloat
+    private let regionPlanner: RecognitionRegionPlanner
 
-    init(pdfRenderWidth: CGFloat = 2_000) {
+    init(
+        pdfRenderWidth: CGFloat = 2_000,
+        regionPlanner: RecognitionRegionPlanner? = nil
+    ) {
         self.pdfRenderWidth = pdfRenderWidth
+        self.regionPlanner = regionPlanner ?? RecognitionRegionPlanner(renderWidth: pdfRenderWidth)
     }
 
     func pages(
@@ -180,7 +256,7 @@ struct SourceDocumentPageLoader {
             throw DocumentRecognitionError.emptyPDF
         }
 
-        return try (0..<document.pageCount).map { pageIndex in
+        return try (0..<document.pageCount).flatMap { pageIndex in
             guard let page = document.page(at: pageIndex) else {
                 throw DocumentRecognitionError.pageRenderingFailed(pageIndex: pageIndex)
             }
@@ -188,16 +264,73 @@ struct SourceDocumentPageLoader {
             guard bounds.width > 0, bounds.height > 0 else {
                 throw DocumentRecognitionError.pageRenderingFailed(pageIndex: pageIndex)
             }
-            let targetSize = CGSize(
-                width: pdfRenderWidth,
-                height: pdfRenderWidth * bounds.height / bounds.width
-            )
-            let image = page.thumbnail(of: targetSize, for: .mediaBox)
-            guard let imageData = image.pngData() else {
-                throw DocumentRecognitionError.pageRenderingFailed(pageIndex: pageIndex)
+            let regions = regionPlanner.regions(for: bounds.size)
+            return try regions.map { region in
+                let imageData: Data
+                if region == RecognitionPageInput.fullPageRegion {
+                    let targetSize = CGSize(
+                        width: pdfRenderWidth,
+                        height: pdfRenderWidth * bounds.height / bounds.width
+                    )
+                    let image = page.thumbnail(of: targetSize, for: .mediaBox)
+                    guard let data = image.pngData() else {
+                        throw DocumentRecognitionError.pageRenderingFailed(pageIndex: pageIndex)
+                    }
+                    imageData = data
+                } else {
+                    imageData = try render(
+                        page: page,
+                        bounds: bounds,
+                        normalizedRegion: region,
+                        pageIndex: pageIndex
+                    )
+                }
+                return RecognitionPageInput(
+                    pageIndex: pageIndex,
+                    imageData: imageData,
+                    normalizedRegion: region
+                )
             }
-            return RecognitionPageInput(pageIndex: pageIndex, imageData: imageData)
         }
+    }
+
+    private func render(
+        page: PDFPage,
+        bounds: CGRect,
+        normalizedRegion: CGRect,
+        pageIndex: Int
+    ) throws -> Data {
+        let sourceRegion = CGRect(
+            x: bounds.minX + normalizedRegion.minX * bounds.width,
+            y: bounds.minY + normalizedRegion.minY * bounds.height,
+            width: normalizedRegion.width * bounds.width,
+            height: normalizedRegion.height * bounds.height
+        )
+        let pixelWidth = Int(pdfRenderWidth.rounded(.up))
+        let scale = pdfRenderWidth / sourceRegion.width
+        let pixelHeight = Int((sourceRegion.height * scale).rounded(.up))
+        guard pixelWidth > 0, pixelHeight > 0,
+              let context = CGContext(
+                data: nil,
+                width: pixelWidth,
+                height: pixelHeight,
+                bitsPerComponent: 8,
+                bytesPerRow: 0,
+                space: CGColorSpaceCreateDeviceRGB(),
+                bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+              ) else {
+            throw DocumentRecognitionError.pageRenderingFailed(pageIndex: pageIndex)
+        }
+        context.setFillColor(UIColor.white.cgColor)
+        context.fill(CGRect(x: 0, y: 0, width: pixelWidth, height: pixelHeight))
+        context.scaleBy(x: scale, y: scale)
+        context.translateBy(x: -sourceRegion.minX, y: -sourceRegion.minY)
+        page.draw(with: .mediaBox, to: context)
+        guard let image = context.makeImage(),
+              let data = UIImage(cgImage: image).pngData() else {
+            throw DocumentRecognitionError.pageRenderingFailed(pageIndex: pageIndex)
+        }
+        return data
     }
 }
 
@@ -217,10 +350,25 @@ struct DocumentRecognitionService {
             documentType: documentType
         )
         var pages: [RecognizedDocumentPage] = []
-        pages.reserveCapacity(pageInputs.count)
+        let physicalPageIndexes = pageInputs.map(\.pageIndex).reduce(into: [Int]()) {
+            if !$0.contains($1) { $0.append($1) }
+        }
+        pages.reserveCapacity(physicalPageIndexes.count)
 
-        for pageInput in pageInputs {
-            let page = try await recognize(pageInput)
+        for pageIndex in physicalPageIndexes {
+            let regions = pageInputs.filter { $0.pageIndex == pageIndex }
+            var regionLines: [RecognizedDocumentLine] = []
+            for region in regions {
+                regionLines += try await recognize(region)
+            }
+            let mergedLines = Self.mergedLines(regionLines)
+            let page = RecognizedDocumentPage(
+                pageIndex: pageIndex,
+                lines: mergedLines,
+                warnings: mergedLines.isEmpty
+                    ? [RecognitionWarning(pageIndex: pageIndex, kind: .noTextDetected)]
+                    : []
+            )
             pages.append(await refineDistributedEnergyRows(
                 in: page,
                 sourceURL: sourceURL,
@@ -454,37 +602,83 @@ struct DocumentRecognitionService {
 
     private func recognize(
         _ pageInput: RecognitionPageInput
-    ) async throws -> RecognizedDocumentPage {
+    ) async throws -> [RecognizedDocumentLine] {
         var request = RecognizeDocumentsRequest()
         request.textRecognitionOptions.automaticallyDetectLanguage = true
         let observations = try await request.perform(on: pageInput.imageData)
 
         guard let document = observations.first?.document else {
-            return RecognizedDocumentPage(
-                pageIndex: pageInput.pageIndex,
-                lines: [],
-                warnings: [
-                    RecognitionWarning(
-                        pageIndex: pageInput.pageIndex,
-                        kind: .noTextDetected
-                    ),
-                ]
-            )
+            return []
         }
 
-        let lines = document.text.lines.map { line in
+        return document.text.lines.map { line in
             RecognizedDocumentLine(
                 text: line.transcript,
-                normalizedBoundingBox: line.boundingRegion.boundingBox.cgRect
+                normalizedBoundingBox: Self.remap(
+                    line.boundingRegion.boundingBox.cgRect,
+                    from: pageInput.normalizedRegion
+                )
             )
         }
-        let warnings = lines.isEmpty
-            ? [RecognitionWarning(pageIndex: pageInput.pageIndex, kind: .noTextDetected)]
-            : []
-        return RecognizedDocumentPage(
-            pageIndex: pageInput.pageIndex,
-            lines: lines,
-            warnings: warnings
+    }
+
+    nonisolated static func remap(_ localBox: CGRect, from region: CGRect) -> CGRect {
+        CGRect(
+            x: region.minX + localBox.minX * region.width,
+            y: region.minY + localBox.minY * region.height,
+            width: localBox.width * region.width,
+            height: localBox.height * region.height
         )
+    }
+
+    nonisolated static func mergedLines(_ lines: [RecognizedDocumentLine]) -> [RecognizedDocumentLine] {
+        let ordered = lines.sorted(by: readingOrder)
+        return ordered.reduce(into: [RecognizedDocumentLine]()) { result, candidate in
+            guard !result.contains(where: { isOverlapDuplicate($0, candidate) }) else { return }
+            result.append(candidate)
+        }
+    }
+
+    nonisolated private static func readingOrder(
+        _ lhs: RecognizedDocumentLine,
+        _ rhs: RecognizedDocumentLine
+    ) -> Bool {
+        let rowTolerance = max(lhs.normalizedBoundingBox.height, rhs.normalizedBoundingBox.height) * 0.5
+        if abs(lhs.normalizedBoundingBox.midY - rhs.normalizedBoundingBox.midY) <= rowTolerance {
+            return lhs.normalizedBoundingBox.minX < rhs.normalizedBoundingBox.minX
+        }
+        return lhs.normalizedBoundingBox.midY > rhs.normalizedBoundingBox.midY
+    }
+
+    nonisolated private static func isOverlapDuplicate(
+        _ lhs: RecognizedDocumentLine,
+        _ rhs: RecognizedDocumentLine
+    ) -> Bool {
+        let intersection = lhs.normalizedBoundingBox.intersection(rhs.normalizedBoundingBox)
+        guard !intersection.isNull else { return false }
+        let smallerArea = min(
+            lhs.normalizedBoundingBox.width * lhs.normalizedBoundingBox.height,
+            rhs.normalizedBoundingBox.width * rhs.normalizedBoundingBox.height
+        )
+        guard smallerArea > 0 else { return false }
+        let overlapFraction = intersection.width * intersection.height / smallerArea
+        if normalizedText(lhs.text) == normalizedText(rhs.text) {
+            return overlapFraction >= 0.5
+        }
+        let rowHeight = max(lhs.normalizedBoundingBox.height, rhs.normalizedBoundingBox.height)
+        return overlapFraction >= 0.8
+            && abs(lhs.normalizedBoundingBox.midY - rhs.normalizedBoundingBox.midY)
+                <= rowHeight * 0.5
+    }
+
+    nonisolated private static func normalizedText(_ text: String) -> String {
+        text.lowercased()
+            .replacingOccurrences(
+                of: #"[^\p{L}\p{N}]+"#,
+                with: " ",
+                options: .regularExpression
+            )
+            .split(whereSeparator: \.isWhitespace)
+            .joined(separator: " ")
     }
 }

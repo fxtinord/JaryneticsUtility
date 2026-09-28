@@ -7,6 +7,91 @@ import UIKit
 @MainActor
 struct DocumentRecognitionTests {
     @Test
+    func ordinaryPageUsesSingleFullRecognitionRegion() {
+        let regions = RecognitionRegionPlanner().regions(for: CGSize(width: 612, height: 792))
+        let sourceBox = CGRect(x: 0.12, y: 0.34, width: 0.45, height: 0.06)
+
+        #expect(regions == [RecognitionPageInput.fullPageRegion])
+        #expect(DocumentRecognitionService.remap(sourceBox, from: regions[0]) == sourceBox)
+    }
+
+    @Test
+    func extremePortraitPageUsesOverlappingRecognitionRegions() {
+        let regions = RecognitionRegionPlanner().regions(for: CGSize(width: 902, height: 3821))
+
+        #expect(regions.count > 1)
+        #expect(regions.allSatisfy { $0.width == 1 && $0.height < 1 })
+        #expect(zip(regions, regions.dropFirst()).allSatisfy { previous, next in
+            previous.maxY > next.minY
+        })
+    }
+
+    @Test
+    func segmentCoordinatesMapBackToPhysicalPageCoordinates() {
+        let local = CGRect(x: 0.20, y: 0.25, width: 0.30, height: 0.10)
+        let lower = DocumentRecognitionService.remap(
+            local,
+            from: CGRect(x: 0, y: 0, width: 1, height: 0.40)
+        )
+        let middle = DocumentRecognitionService.remap(
+            local,
+            from: CGRect(x: 0, y: 0.30, width: 1, height: 0.40)
+        )
+        let upper = DocumentRecognitionService.remap(
+            local,
+            from: CGRect(x: 0, y: 0.60, width: 1, height: 0.40)
+        )
+
+        expectBox(lower, equals: CGRect(x: 0.20, y: 0.10, width: 0.30, height: 0.04))
+        expectBox(middle, equals: CGRect(x: 0.20, y: 0.40, width: 0.30, height: 0.04))
+        expectBox(upper, equals: CGRect(x: 0.20, y: 0.70, width: 0.30, height: 0.04))
+    }
+
+    @Test
+    func mergedSegmentLinesUseStableTopToBottomReadingOrder() {
+        let lines = DocumentRecognitionService.mergedLines([
+            recognizedLine("LOWER", x: 0.1, y: 0.10),
+            recognizedLine("UPPER RIGHT", x: 0.6, y: 0.80),
+            recognizedLine("MIDDLE", x: 0.1, y: 0.45),
+            recognizedLine("UPPER LEFT", x: 0.1, y: 0.80),
+        ])
+
+        #expect(lines.map(\.text) == ["UPPER LEFT", "UPPER RIGHT", "MIDDLE", "LOWER"])
+    }
+
+    @Test
+    func overlapDuplicateIsRemovedButDistantRepeatedTextIsPreserved() {
+        let lines = DocumentRecognitionService.mergedLines([
+            recognizedLine("CURRENT CHARGES", x: 0.10, y: 0.70),
+            recognizedLine("CURRENT   CHARGES", x: 0.105, y: 0.702),
+            recognizedLine("CURRENT CHARGES", x: 0.10, y: 0.20),
+        ])
+
+        #expect(lines.count == 2)
+        #expect(lines.map(\.normalizedBoundingBox.midY).sorted().first! < 0.3)
+        #expect(lines.map(\.normalizedBoundingBox.midY).sorted().last! > 0.7)
+    }
+
+    @Test
+    func extremePhysicalPDFPageKeepsOnePageIdentityAcrossRegions() throws {
+        let testDirectory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: testDirectory) }
+        let pdfURL = try writeExtremeSyntheticPDF(in: testDirectory)
+
+        let regions = try SourceDocumentPageLoader().pages(from: pdfURL, documentType: .pdf)
+
+        #expect(regions.count > 1)
+        #expect(regions.allSatisfy { $0.pageIndex == 0 })
+        #expect(regions.allSatisfy { $0.normalizedRegion.height < 1 })
+        #expect(regions.allSatisfy { input in
+            guard let image = UIImage(data: input.imageData), let cgImage = image.cgImage else {
+                return false
+            }
+            return max(cgImage.width, cgImage.height) <= 4_100
+        })
+    }
+
+    @Test
     func recognizesStableTokensFromSyntheticImageWithoutVerifyingBill() async throws {
         let testDirectory = try makeTemporaryDirectory()
         defer { try? FileManager.default.removeItem(at: testDirectory) }
@@ -174,6 +259,44 @@ struct DocumentRecognitionTests {
             drawPDFPage(text: "BETA PAGE", in: context, bounds: pageBounds)
         }
         return pdfURL
+    }
+
+    private func writeExtremeSyntheticPDF(in directoryURL: URL) throws -> URL {
+        let pdfURL = directoryURL.appendingPathComponent("extreme-synthetic.pdf")
+        let pageBounds = CGRect(x: 0, y: 0, width: 902, height: 3821)
+        let renderer = UIGraphicsPDFRenderer(bounds: pageBounds)
+        try renderer.writePDF(to: pdfURL) { context in
+            context.beginPage()
+            UIColor.white.setFill()
+            context.fill(pageBounds)
+            NSString(string: "SYNTHETIC EXTREME PAGE").draw(
+                in: CGRect(x: 60, y: 100, width: 700, height: 50),
+                withAttributes: [
+                    .font: UIFont.systemFont(ofSize: 24, weight: .bold),
+                    .foregroundColor: UIColor.black,
+                ]
+            )
+        }
+        return pdfURL
+    }
+
+    private func recognizedLine(
+        _ text: String,
+        x: CGFloat,
+        y: CGFloat
+    ) -> RecognizedDocumentLine {
+        RecognizedDocumentLine(
+            text: text,
+            normalizedBoundingBox: CGRect(x: x, y: y, width: 0.30, height: 0.04)
+        )
+    }
+
+    private func expectBox(_ actual: CGRect, equals expected: CGRect) {
+        let tolerance = 0.000_000_1
+        #expect(abs(actual.minX - expected.minX) < tolerance)
+        #expect(abs(actual.minY - expected.minY) < tolerance)
+        #expect(abs(actual.width - expected.width) < tolerance)
+        #expect(abs(actual.height - expected.height) < tolerance)
     }
 
     private func drawPDFPage(

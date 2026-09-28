@@ -231,6 +231,12 @@ private struct RecognitionResultView: View {
                 if !guided.serviceAssociations.isEmpty {
                     SemanticGuidedProposalSection(result: guided)
                 }
+                let normalized = NormalizedBillRecordAssembler().assemble(
+                    recognition: result,
+                    extraction: extraction,
+                    semanticGuided: guided
+                )
+                NormalizedBillRecordSection(record: normalized)
 #endif
                 RecognitionTextSection(text: result.text)
             }
@@ -247,6 +253,95 @@ private struct RecognitionResultView: View {
 }
 
 #if DEBUG
+private struct NormalizedBillRecordSection: View {
+    let record: NormalizedBillRecord
+
+    var body: some View {
+        Section {
+            proposalRow(record.billIssuer)
+            proposalRow(record.statementDate)
+            proposalRow(record.totalAmountDue)
+            ForEach(Array(record.warnings.enumerated()), id: \.offset) { _, warning in
+                Text(warningLabel(warning))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            if record.billIssuer == nil,
+               record.statementDate == nil,
+               record.totalAmountDue == nil {
+                Text("No bill-level fields identified.")
+                    .foregroundStyle(.secondary)
+            }
+        } header: {
+            Text("DEVELOPMENT / NORMALIZED FIRST-BILL RECORD")
+        } footer: {
+            Text("This normalized record is proposed, unverified, transient, and has not changed the saved bill.")
+        }
+
+        ForEach(record.services) { service in
+            Section {
+                serviceRow(service.billingPeriodStart)
+                serviceRow(service.billingPeriodEnd)
+                serviceRow(service.billingDays)
+                serviceRow(service.usageQuantity)
+                serviceRow(service.usageUnit)
+                serviceRow(service.currentPeriodCharges)
+                if let distributedEnergy = service.distributedEnergy {
+                    ForEach(distributedEnergy.proposals) { proposal in
+                        ProposedFieldRow(
+                            label: proposal.field.rawValue,
+                            value: proposal.value,
+                            provenance: proposal.provenance,
+                            origin: proposal.origin
+                        )
+                    }
+                }
+            } header: {
+                Text(serviceName(service.serviceType))
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func proposalRow(_ proposal: BillStatementFieldProposal?) -> some View {
+        if let proposal {
+            ProposedFieldRow(
+                label: proposal.field.rawValue,
+                value: proposal.value,
+                provenance: proposal.provenance,
+                origin: proposal.origin
+            )
+        }
+    }
+
+    @ViewBuilder
+    private func serviceRow(_ proposal: BillServiceFieldProposal?) -> some View {
+        if let proposal {
+            ProposedFieldRow(
+                label: proposal.field.rawValue,
+                value: proposal.value,
+                provenance: proposal.provenance,
+                origin: proposal.origin
+            )
+        }
+    }
+
+    private func serviceName(_ serviceType: UtilityServiceType) -> String {
+        switch serviceType {
+        case .electricity: String(localized: "Electricity")
+        case .naturalGas: String(localized: "Natural Gas")
+        case .waterWastewater: String(localized: "Water / Wastewater")
+        }
+    }
+
+    private func warningLabel(_ warning: NormalizedBillRecordWarning) -> String {
+        switch warning {
+        case .conflictingIssuerEvidence(let direct, let providerNeutral):
+            "Issuer evidence conflict: retained direct “\(direct)” over provider-neutral “\(providerNeutral)”."
+        }
+    }
+}
+
 private struct SemanticGuidedProposalSection: View {
     let result: SemanticGuidedAssociationResult
 
