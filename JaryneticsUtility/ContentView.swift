@@ -237,6 +237,10 @@ private struct RecognitionResultView: View {
                     semanticGuided: guided
                 )
                 NormalizedBillRecordSection(record: normalized)
+                let summary = FirstBillSummaryAssembler().assemble(from: normalized)
+                if summary.hasContent {
+                    FirstBillSummarySection(summary: summary)
+                }
 #endif
                 RecognitionTextSection(text: result.text)
             }
@@ -253,6 +257,84 @@ private struct RecognitionResultView: View {
 }
 
 #if DEBUG
+private struct FirstBillSummarySection: View {
+    let summary: FirstBillSummary
+
+    var body: some View {
+        Section {
+            Text("Utility Bill Summary")
+                .font(.headline)
+            if let issuer = summary.billIssuer {
+                LabeledContent("Utility", value: issuer.value)
+            }
+            if let statementDate = summary.statementDate {
+                LabeledContent(
+                    "Statement date",
+                    value: BillDateOnlyPresentation.string(from: statementDate.value)
+                )
+            }
+            if let amountDue = summary.amountDue {
+                LabeledContent(
+                    "Amount due",
+                    value: FirstBillSummaryFormatting.currency(amountDue.value)
+                )
+            }
+        } header: {
+            Text("DEVELOPMENT / FIRST-BILL SUMMARY")
+        } footer: {
+            Text("Proposed from recognized bill information. Review before use.")
+        }
+
+        ForEach(summary.services) { service in
+            FirstBillSummaryServiceSection(service: service)
+        }
+    }
+}
+
+private struct FirstBillSummaryServiceSection: View {
+    let service: FirstBillServiceSummary
+
+    var body: some View {
+        Section(serviceName) {
+            if let period = service.billingPeriod {
+                LabeledContent(
+                    "Billing period",
+                    value: FirstBillSummaryFormatting.billingPeriod(
+                        start: period.start.value,
+                        end: period.end.value
+                    )
+                )
+            }
+            if let billingDays = service.billingDays {
+                LabeledContent("Billing days", value: billingDays.value.formatted())
+            }
+            if let usage = service.usage {
+                LabeledContent(
+                    "Usage",
+                    value: FirstBillSummaryFormatting.usage(
+                        quantity: usage.quantity.value,
+                        unit: usage.unit.value
+                    )
+                )
+            }
+            if let charges = service.currentPeriodCharges {
+                LabeledContent(
+                    "Current-period charges",
+                    value: FirstBillSummaryFormatting.currency(charges.value)
+                )
+            }
+        }
+    }
+
+    private var serviceName: String {
+        switch service.serviceType {
+        case .electricity: String(localized: "Electricity")
+        case .naturalGas: String(localized: "Natural Gas")
+        case .waterWastewater: String(localized: "Water / Wastewater")
+        }
+    }
+}
+
 private struct NormalizedBillRecordSection: View {
     let record: NormalizedBillRecord
 
