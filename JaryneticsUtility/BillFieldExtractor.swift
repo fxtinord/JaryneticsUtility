@@ -226,7 +226,7 @@ struct BillFieldExtractor {
         let billIssuer = uniqueBillIssuer(in: lines)
         let statementDate = uniqueDate(
             in: lines,
-            labelPattern: #"\bstatement\s+date\b"#
+            labelPattern: #"\b(?:statement|bill)\s+date\b"#
         )
         let amountDue = uniqueMoney(
             in: lines,
