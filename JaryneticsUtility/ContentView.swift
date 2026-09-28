@@ -224,6 +224,13 @@ private struct RecognitionResultView: View {
                 if !semantics.candidates.isEmpty {
                     SemanticInterpretationSection(classification: semantics)
                 }
+                let guided = SemanticGuidedBillValueAssociator().associate(
+                    recognition: result,
+                    semantics: semantics
+                )
+                if !guided.serviceAssociations.isEmpty {
+                    SemanticGuidedProposalSection(result: guided)
+                }
 #endif
                 RecognitionTextSection(text: result.text)
             }
@@ -240,6 +247,37 @@ private struct RecognitionResultView: View {
 }
 
 #if DEBUG
+private struct SemanticGuidedProposalSection: View {
+    let result: SemanticGuidedAssociationResult
+
+    var body: some View {
+        ForEach(result.serviceAssociations) { association in
+            Section {
+                ForEach(association.proposals) { proposal in
+                    ProposedFieldRow(
+                        label: proposal.field.rawValue,
+                        value: proposal.value,
+                        provenance: proposal.provenance,
+                        origin: proposal.origin
+                    )
+                }
+            } header: {
+                Text("DEVELOPMENT / SEMANTIC-GUIDED PROPOSED SERVICE — \(serviceName(association.serviceType))")
+            } footer: {
+                Text("Semantic-guided proposals are unverified, transient, and have not changed the saved bill.")
+            }
+        }
+    }
+
+    private func serviceName(_ serviceType: UtilityServiceType) -> String {
+        switch serviceType {
+        case .electricity: String(localized: "Electricity")
+        case .naturalGas: String(localized: "Natural Gas")
+        case .waterWastewater: String(localized: "Water / Wastewater")
+        }
+    }
+}
+
 private struct SemanticInterpretationSection: View {
     let classification: BillSemanticClassification
 

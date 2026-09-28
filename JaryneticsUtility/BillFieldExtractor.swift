@@ -44,6 +44,19 @@ struct BillSourceProvenance: Sendable, Equatable {
     let pageIndex: Int
     let snippet: String
     let normalizedBoundingBox: CGRect?
+    let sequenceIndex: Int?
+
+    init(
+        pageIndex: Int,
+        snippet: String,
+        normalizedBoundingBox: CGRect?,
+        sequenceIndex: Int? = nil
+    ) {
+        self.pageIndex = pageIndex
+        self.snippet = snippet
+        self.normalizedBoundingBox = normalizedBoundingBox
+        self.sequenceIndex = sequenceIndex
+    }
 }
 
 struct BillStatementFieldProposal: Sendable, Equatable, Identifiable {
