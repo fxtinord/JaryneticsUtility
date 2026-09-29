@@ -14,6 +14,9 @@ struct ContentView: View {
     @State private var previewURL: URL?
     @State private var recognizingBillIDs: Set<UUID> = []
     @State private var recognitionPresentation: RecognitionPresentation?
+#if DEBUG
+    @State private var previousNormalizedBillRecord: NormalizedBillRecord?
+#endif
 
     var body: some View {
         NavigationStack {
@@ -37,10 +40,18 @@ struct ContentView: View {
             }
             .quickLookPreview($previewURL)
             .sheet(item: $recognitionPresentation) { presentation in
+#if DEBUG
+                RecognitionResultView(
+                    result: presentation.result,
+                    extraction: presentation.extraction,
+                    changeSummary: presentation.changeSummary
+                )
+#else
                 RecognitionResultView(
                     result: presentation.result,
                     extraction: presentation.extraction
                 )
+#endif
             }
             .alert("Document Error", isPresented: $isShowingError) {
                 Button("OK") {}
@@ -94,11 +105,36 @@ struct ContentView: View {
                     documentType: sourceDocument.documentType
                 )
                 let extraction = BillFieldExtractor().extract(from: result)
+#if DEBUG
+                let semantics = HybridBillSemanticClassifier().classify(result)
+                let guided = SemanticGuidedBillValueAssociator().associate(
+                    recognition: result,
+                    semantics: semantics
+                )
+                let normalized = NormalizedBillRecordAssembler().assemble(
+                    recognition: result,
+                    extraction: extraction,
+                    semanticGuided: guided
+                )
+                let changeSummary = previousNormalizedBillRecord.map { previous in
+                    let comparison = NormalizedBillComparisonAssembler().assemble(previous, normalized)
+                    let change = NormalizedBillChangeAssembler().assemble(from: comparison)
+                    return BillChangeSummaryAssembler().assemble(from: change)
+                }
+                previousNormalizedBillRecord = normalized
+                recognitionPresentation = RecognitionPresentation(
+                    id: bill.id,
+                    result: result,
+                    extraction: extraction,
+                    changeSummary: changeSummary
+                )
+#else
                 recognitionPresentation = RecognitionPresentation(
                     id: bill.id,
                     result: result,
                     extraction: extraction
                 )
+#endif
             } catch {
                 present(error)
             }
@@ -203,12 +239,18 @@ private struct RecognitionPresentation: Identifiable {
     let id: UUID
     let result: DocumentRecognitionResult
     let extraction: BillExtractionResult
+#if DEBUG
+    let changeSummary: BillChangeSummary?
+#endif
 }
 
 private struct RecognitionResultView: View {
     @Environment(\.dismiss) private var dismiss
     let result: DocumentRecognitionResult
     let extraction: BillExtractionResult
+#if DEBUG
+    let changeSummary: BillChangeSummary?
+#endif
 
     var body: some View {
         NavigationStack {
@@ -220,6 +262,9 @@ private struct RecognitionResultView: View {
                 )
                 ProposedDataSection(extraction: extraction)
 #if DEBUG
+                RecognitionEvidenceDiagnosticSection(
+                    diagnostic: RecognitionEvidenceDiagnosticAssembler().assemble(from: result)
+                )
                 let semantics = HybridBillSemanticClassifier().classify(result)
                 if !semantics.candidates.isEmpty {
                     SemanticInterpretationSection(classification: semantics)
@@ -241,6 +286,9 @@ private struct RecognitionResultView: View {
                 if summary.hasContent {
                     FirstBillSummarySection(summary: summary)
                 }
+                if let changeSummary {
+                    BillChangeSummarySection(summary: changeSummary)
+                }
 #endif
                 RecognitionTextSection(text: result.text)
             }
@@ -257,6 +305,171 @@ private struct RecognitionResultView: View {
 }
 
 #if DEBUG
+private struct RecognitionEvidenceDiagnosticSection: View {
+    let diagnostic: RecognitionEvidenceDiagnostic
+
+    var body: some View {
+        Section {
+            if diagnostic.candidateWindows.isEmpty {
+                Text("No bill-date or amount-due label candidates were discovered.")
+                    .foregroundStyle(.secondary)
+            } else {
+                ForEach(diagnostic.candidateWindows) { window in
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Candidate window · Page \(window.pageIndex + 1) · Observation \(window.sequenceIndex)")
+                            .font(.subheadline.weight(.semibold))
+                        ForEach(window.observations) { observation in
+                            diagnosticObservation(observation)
+                        }
+                    }
+                    .padding(.vertical, 4)
+                }
+            }
+
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Page 1 early observations")
+                    .font(.subheadline.weight(.semibold))
+                if diagnostic.earlyPageObservations.isEmpty {
+                    Text("No early-page OCR observations are available.")
+                        .foregroundStyle(.secondary)
+                } else {
+                    ForEach(diagnostic.earlyPageObservations) { observation in
+                        diagnosticObservation(observation)
+                    }
+                }
+            }
+            .padding(.vertical, 4)
+        } header: {
+            Text("DEVELOPMENT / RECOGNITION EVIDENCE DIAGNOSTIC")
+        } footer: {
+            Text("Diagnostic OCR observations only. These values have not been accepted as bill data.")
+        }
+    }
+
+    private func diagnosticObservation(
+        _ observation: RecognitionEvidenceDiagnosticObservation
+    ) -> some View {
+        let box = observation.normalizedBoundingBox
+        let boxDescription = "Box: x \(coordinate(box.minX)) · y \(coordinate(box.minY)) · "
+            + "w \(coordinate(box.width)) · h \(coordinate(box.height))"
+        return VStack(alignment: .leading, spacing: 2) {
+            Text("Page \(observation.pageIndex + 1) (index \(observation.pageIndex)) · Observation \(observation.sequenceIndex)")
+                .font(.caption.weight(.semibold))
+            Text("Role: \(observation.role.rawValue)")
+                .font(.caption)
+            Text("Text: \(observation.text)")
+                .font(.caption)
+            Text(boxDescription)
+            .font(.caption.monospaced())
+            .foregroundStyle(.secondary)
+        }
+    }
+
+    private func coordinate(_ value: CGFloat) -> String {
+        String(format: "%.6f", value)
+    }
+}
+
+private struct BillChangeSummarySection: View {
+    let summary: BillChangeSummary
+
+    var body: some View {
+        Section {
+            Text("Utility Bill Change Summary")
+                .font(.headline)
+            if let utilityName = summary.utilityName {
+                LabeledContent("Utility", value: utilityName)
+            }
+            if summary.services.isEmpty {
+                Text("These records do not contain enough comparable information for a bill-change summary.")
+                    .foregroundStyle(.secondary)
+            }
+        } header: {
+            Text("DEVELOPMENT / BILL CHANGE SUMMARY")
+        } footer: {
+            Text("Calculated from recognized bill information. Review before use.")
+        }
+
+        ForEach(summary.services) { service in
+            BillChangeServiceSummarySection(service: service)
+        }
+    }
+
+}
+
+private struct BillChangeServiceSummarySection: View {
+    let service: BillChangeServiceSummary
+
+    var body: some View {
+        Section(BillChangeSummaryFormatting.serviceName(service.serviceType)) {
+            periodRows
+            if let usage = service.usage {
+                metricRows(title: "Usage", metric: usage)
+            }
+            if let charges = service.currentPeriodCharges {
+                metricRows(title: "Current-period charges", metric: charges)
+            }
+            if !service.hasCalculatedMetric {
+                Text("A reliable usage or charge comparison is not available for these bills.")
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var periodRows: some View {
+        if let period = service.earlierPeriod,
+           let value = BillChangeSummaryFormatting.period(period) {
+            LabeledContent("Earlier period", value: value)
+        }
+        if let days = service.earlierBillingDays,
+           let value = BillChangeSummaryFormatting.billingDays(days) {
+            LabeledContent("Earlier billing days", value: value)
+        }
+        if let period = service.laterPeriod,
+           let value = BillChangeSummaryFormatting.period(period) {
+            LabeledContent("Later period", value: value)
+        }
+        if let days = service.laterBillingDays,
+           let value = BillChangeSummaryFormatting.billingDays(days) {
+            LabeledContent("Later billing days", value: value)
+        }
+    }
+
+    @ViewBuilder
+    private func metricRows(title: String, metric: BillChangeSummaryMetric) -> some View {
+        let calculation = metric.calculation
+        Text(BillChangeSummaryFormatting.direction(calculation.direction, metricName: title))
+            .font(.subheadline.weight(.semibold))
+        LabeledContent(
+            "Earlier",
+            value: BillChangeSummaryFormatting.sourceValue(
+                calculation.earlierValue,
+                unit: metric.unit
+            )
+        )
+        LabeledContent(
+            "Later",
+            value: BillChangeSummaryFormatting.sourceValue(
+                calculation.laterValue,
+                unit: metric.unit
+            )
+        )
+        LabeledContent(
+            "Change",
+            value: BillChangeSummaryFormatting.signedChange(
+                calculation.delta,
+                unit: metric.unit
+            )
+        )
+        if let percentage = BillChangeSummaryFormatting.percentage(calculation.percentageChange) {
+            LabeledContent("Percentage change", value: percentage)
+        } else {
+            LabeledContent("Percentage change", value: "Not available")
+        }
+    }
+}
+
 private struct FirstBillSummarySection: View {
     let summary: FirstBillSummary
 

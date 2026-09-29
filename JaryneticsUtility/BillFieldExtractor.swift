@@ -184,7 +184,7 @@ struct BillFieldExtractor {
         static let leadingTolerance: CGFloat = 0.02
     }
 
-    private static let datePattern = #"(?:\d{1,2}/\d{1,2}/(?:\d{4}|\d{2})\b|(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:t(?:ember)?)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\s+\d{1,2},\s+\d{4})"#
+    private static let datePattern = #"(?:\d{1,2}/\d{1,2}/(?:\d{4}|\d{2})\b|(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:t(?:ember)?)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)(?:\s+\d{1,2},\s+|-\d{1,2}-)\d{4})"#
     private static let moneyPattern = #"\$?\s*([0-9]{1,3}(?:,[0-9]{3})*|[0-9]+)\.([0-9]{2})"#
     private static let usageValuePattern = #"(?<![-+])\b[0-9]+(?:,[0-9]{3})*(?:\.\d+)?\s*(?:kwh|therms?|ccf|gallons?|gal|water\s+units?)\b"#
     private static let nonCurrentContextPattern = #"\b(?:previous|prior|historical|history|past[\s-]+due|average|daily|comparison|comparative|compare|last\s+(?:month|period|year)|year[\s-]+over[\s-]+year)\b"#
@@ -230,8 +230,9 @@ struct BillFieldExtractor {
         )
         let amountDue = uniqueMoney(
             in: lines,
-            labelPattern: #"\b(?:total\s+)?amount\s+due\b"#,
-            allowsSplitAssociation: true
+            labelPattern: #"\b(?:total(?:\s+amount)?|amount)\s+du[eo]\b"#,
+            allowsSplitAssociation: true,
+            maximumSplitSequenceDistance: 2
         )
         let dueDate = uniqueDate(
             in: lines,
@@ -581,7 +582,8 @@ struct BillFieldExtractor {
         labelPattern: String,
         allowsSplitAssociation: Bool = false,
         splitValueLines: [SourceLine]? = nil,
-        explicitlyScopedService: UtilityServiceType? = nil
+        explicitlyScopedService: UtilityServiceType? = nil,
+        maximumSplitSequenceDistance: Int? = nil
     ) -> Candidate<Decimal>? {
         let directCandidates: [Candidate<Decimal>] = candidates(in: lines) { line in
             let amountTexts = allMatches(Self.moneyPattern, in: line.text)
@@ -603,7 +605,8 @@ struct BillFieldExtractor {
                 valueLines: splitValueLines ?? lines,
                 labelMatches: { matches(labelPattern, in: $0) },
                 valueParser: standaloneMoneyValue,
-                explicitlyScopedService: explicitlyScopedService
+                explicitlyScopedService: explicitlyScopedService,
+                maximumSequenceDistance: maximumSplitSequenceDistance
             )
             : []
         return unique(directCandidates + splitCandidates)
@@ -1031,7 +1034,8 @@ struct BillFieldExtractor {
         labelMatches: (String) -> Bool,
         valueParser: (String) -> Value?,
         explicitlyScopedService: UtilityServiceType? = nil,
-        reservedSameRowLabelMatches: ((String) -> Bool)? = nil
+        reservedSameRowLabelMatches: ((String) -> Bool)? = nil,
+        maximumSequenceDistance: Int? = nil
     ) -> [Candidate<Value>] {
         lines.compactMap { labelSource in
             guard isEligibleCurrentLine(labelSource.line.text),
@@ -1049,6 +1053,16 @@ struct BillFieldExtractor {
             let candidateValueLines = hasExplicitMatchingScope ? valueLines : lines
             let associatedValues = candidateValueLines.compactMap {
                 valueSource -> (Value, SourceLine, LayoutAssociationTier)? in
+                if let maximumSequenceDistance,
+                   let labelIndex = candidateValueLines.firstIndex(where: {
+                       isSameSourceLine($0, labelSource)
+                   }),
+                   let valueIndex = candidateValueLines.firstIndex(where: {
+                       isSameSourceLine($0, valueSource)
+                   }),
+                   abs(labelIndex - valueIndex) > maximumSequenceDistance {
+                    return nil
+                }
                 guard valueSource.pageIndex == labelSource.pageIndex,
                       isEligibleCurrentLine(valueSource.line.text),
                       let tier = layoutAssociationTier(
@@ -1246,7 +1260,9 @@ struct BillFieldExtractor {
     }
 
     private func parseDate(_ text: String) -> Date? {
-        let formats = ["M/d/yyyy", "M/d/yy", "MMMM d, yyyy", "MMM d, yyyy"]
+        let formats = [
+            "M/d/yyyy", "M/d/yy", "MMMM d, yyyy", "MMM d, yyyy", "MMMM-dd-yyyy", "MMM-dd-yyyy",
+        ]
         for format in formats {
             let formatter = DateFormatter()
             formatter.calendar = Calendar(identifier: .gregorian)

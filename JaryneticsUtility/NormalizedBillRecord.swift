@@ -188,14 +188,69 @@ struct ProviderNeutralBillIdentityResolver {
 
     private func isRejectedIdentityText(_ text: String) -> Bool {
         let generalRejection = text.range(
-            of: #"\b(?:customer|customer\s+name|service\s+address|mailing\s+address|account\s+(?:number|summary)|current\s+charges|amount\s+due|payment|emergency|outage|contact|phone|telephone)\b"#,
+            of: #"\b(?:customer|customer\s+name|service\s+address|mailing\s+address|account\s+(?:number|summary)|billing\s+summary|current\s+(?:charges|water|sewer)|previous\s+balance|total\s+due|amount\s+due|account\s+number|meter\s+information|bill\s+date|due\s+date|payment|payments|adjustments?|balance|garbage|penalty|usage|readings?|taxes?|fees?|credits?|supply|delivery|emergency|outage|contact|phone|telephone)\b"#,
             options: [.regularExpression, .caseInsensitive]
         ) != nil
         let corporateDescriptor = text.range(
             of: #"^(?:an?|the)\s+.+\s+compan(?:y|ies)\.?$|\b(?:subsidiary|member|division|affiliate)\s+of\b|\bparent\s+compan(?:y|ies)\b"#,
             options: [.regularExpression, .caseInsensitive]
         ) != nil
-        return generalRejection || corporateDescriptor
+        return generalRejection || corporateDescriptor || resemblesBillingVocabulary(text)
+    }
+
+    /// OCR may slightly corrupt a billing label into a plausible-looking brand word.
+    /// Fuzzy rejection is deliberately bounded to known non-identity bill vocabulary.
+    private func resemblesBillingVocabulary(_ text: String) -> Bool {
+        let candidate = compactVocabulary(text)
+        guard !candidate.isEmpty else { return false }
+        return nonIdentityBillingVocabulary.contains { term in
+            let reference = compactVocabulary(term)
+            let allowedDistance = reference.count >= 8 ? 2 : reference.count >= 5 ? 1 : 0
+            guard abs(candidate.count - reference.count) <= allowedDistance else { return false }
+            return editDistance(candidate, reference, limit: allowedDistance) <= allowedDistance
+        }
+    }
+
+    private var nonIdentityBillingVocabulary: [String] {
+        [
+            "adjustment", "adjustments", "balance", "previous balance", "payment", "payments",
+            "current charges", "current water", "current sewer", "garbage", "penalty", "total due",
+            "amount due", "billing summary", "account summary", "meter information", "service address",
+            "bill date", "due date", "customer name", "account number", "usage", "reading", "readings",
+            "tax", "taxes", "fee", "fees", "credit", "credits", "supply", "delivery", "remittance",
+            "payment processor", "assistance program",
+        ]
+    }
+
+    private func compactVocabulary(_ text: String) -> String {
+        text.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
+            .unicodeScalars
+            .filter(CharacterSet.letters.contains)
+            .map(String.init)
+            .joined()
+    }
+
+    private func editDistance(_ first: String, _ second: String, limit: Int) -> Int {
+        let lhs = Array(first)
+        let rhs = Array(second)
+        guard abs(lhs.count - rhs.count) <= limit else { return limit + 1 }
+        var previous = Array(0...rhs.count)
+        for (row, left) in lhs.enumerated() {
+            var current = [row + 1]
+            var rowMinimum = row + 1
+            for (column, right) in rhs.enumerated() {
+                let value = min(
+                    current[column] + 1,
+                    previous[column + 1] + 1,
+                    previous[column] + (left == right ? 0 : 1)
+                )
+                current.append(value)
+                rowMinimum = min(rowMinimum, value)
+            }
+            if rowMinimum > limit { return limit + 1 }
+            previous = current
+        }
+        return previous[rhs.count]
     }
 
     private func hasSeparatedOrganizationRole(
@@ -321,7 +376,7 @@ private struct AdjacentStatementDateResolver {
         let provenance: BillSourceProvenance
     }
 
-    private static let datePattern = #"(?:\d{1,2}/\d{1,2}/(?:\d{4}|\d{2})|(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:t(?:ember)?)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\s+\d{1,2},\s+\d{4})"#
+    private static let datePattern = #"(?:\d{1,2}/\d{1,2}/(?:\d{4}|\d{2})|(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:t(?:ember)?)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)(?:\s+\d{1,2},\s+|-\d{1,2}-)\d{4})"#
 
     func resolve(from recognition: DocumentRecognitionResult) -> BillStatementFieldProposal? {
         let candidates = recognition.pages.flatMap { page in
@@ -385,7 +440,9 @@ private struct AdjacentStatementDateResolver {
     }
 
     private func parseDate(_ text: String) -> Date? {
-        for format in ["M/d/yyyy", "M/d/yy", "MMMM d, yyyy", "MMM d, yyyy"] {
+        for format in [
+            "M/d/yyyy", "M/d/yy", "MMMM d, yyyy", "MMM d, yyyy", "MMMM-dd-yyyy", "MMM-dd-yyyy",
+        ] {
             let formatter = DateFormatter()
             formatter.calendar = Calendar(identifier: .gregorian)
             formatter.locale = Locale(identifier: "en_US_POSIX")
